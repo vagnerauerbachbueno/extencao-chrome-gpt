@@ -2,17 +2,40 @@
 
 Ponte entre uma API compatível com OpenAI e uma sessão autenticada do ChatGPT Web.
 
-## Arquitetura
+## Objetivo
 
-Cliente -> POST /v1/chat/completions -> API -> fila -> WebSocket -> extensão Chrome -> chatgpt.com -> resposta -> API -> cliente.
+O cliente conversa somente com `/v1/chat/completions`. O navegador é um motor interno de execução.
 
-> Este projeto automatiza a interface web já autenticada no navegador. Ele não usa nem expõe cookies ou credenciais da conta.
+```
+Cliente
+  -> API OpenAI-compatible
+  -> fila
+  -> WebSocket
+  -> extensão Chrome
+  -> chatgpt.com
+  -> extensão
+  -> API
+  -> Cliente
+```
+
+O contrato público permanece padronizado nos dois modos:
+
+- `stream: false`: uma resposta JSON `chat.completion`
+- `stream: true`: SSE com `chat.completion.chunk` e `data: [DONE]`
+
+## Compatibilidade de mensagens
+
+A API aceita `system`, `developer`, `user` e `assistant`.
+
+Como o ChatGPT Web recebe texto pela interface gráfica, mensagens anteriores são compiladas em um envelope interno antes de serem enviadas ao navegador. Para uma única mensagem `user`, o texto é enviado sem alteração.
+
+Isso padroniza o contrato da API sem expor ao cliente os detalhes da extensão.
 
 ## Requisitos
 
 - Node.js 20+
 - Google Chrome ou Microsoft Edge
-- Uma sessão autenticada em https://chatgpt.com/
+- Sessão autenticada em https://chatgpt.com/
 
 ## Servidor
 
@@ -29,33 +52,64 @@ Servidor padrão: `http://localhost:8787`.
 
 Abra `chrome://extensions`, ative "Modo do desenvolvedor", escolha "Carregar sem compactação" e selecione a pasta `extension`.
 
-Abra o ChatGPT em uma aba e clique na extensão para conferir o estado.
+Abra o ChatGPT em uma aba e verifique o estado da extensão.
 
-## API
-
-```bash
-curl http://localhost:8787/v1/models
-```
+## Exemplo normal
 
 ```bash
 curl http://localhost:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer local-dev" \
   -d '{
     "model":"chatgpt-web",
-    "messages":[{"role":"user","content":"Olá, responda apenas OK."}]
+    "stream":false,
+    "messages":[{"role":"user","content":"Explique o que é Firebird."}]
   }'
 ```
 
-Para streaming, envie `"stream": true`.
+Resposta:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1770000000,
+  "model": "chatgpt-web",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "..."
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0
+  }
+}
+```
+
+## Exemplo streaming
+
+Envie `"stream": true`. A resposta usa `text/event-stream`:
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","model":"chatgpt-web","choices":[{"index":0,"delta":{"content":"Olá"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","model":"chatgpt-web","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
 
 ## Variáveis
 
 - `PORT`: porta HTTP/WebSocket, padrão 8787
-- `API_KEY`: opcional; quando definida, exige Bearer token
-- `TASK_TIMEOUT_MS`: timeout de uma tarefa, padrão 180000
+- `API_KEY`: Bearer token opcional
+- `TASK_TIMEOUT_MS`: timeout da tarefa, padrão 180000
+- `QUEUE_TIMEOUT_MS`: timeout aguardando agente, padrão 120000
 - `CORS_ORIGIN`: origem permitida, padrão `*`
 
 ## Segurança
 
-Não coloque credenciais do ChatGPT no servidor. A extensão usa a sessão existente do navegador. Em produção, defina `API_KEY`, use HTTPS/WSS e restrinja CORS.
+Não coloque credenciais do ChatGPT no servidor. A extensão usa a sessão existente do navegador. Em produção, use HTTPS/WSS, defina `API_KEY` e restrinja CORS.
