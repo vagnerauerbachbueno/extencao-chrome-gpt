@@ -24,23 +24,47 @@ const queue = [];
 
 function authorized(req) {
   if (!API_KEY) return true;
-  const value = req.headers.authorization || '';
-  return value === `Bearer ${API_KEY}`;
+  return (req.headers.authorization || '') === `Bearer ${API_KEY}`;
+}
+
+function errorBody(message, type = 'invalid_request_error', code = null) {
+  return { error: { message, type, param: null, code } };
 }
 
 function textFromContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.filter(x => x?.type === 'text').map(x => x.text || '').join('');
+    return content
+      .filter(item => item?.type === 'text')
+      .map(item => item.text || '')
+      .join('');
   }
   return '';
 }
 
-function lastUserMessage(messages = []) {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === 'user') return textFromContent(messages[i].content);
+function normalizeMessages(messages) {
+  return messages.map((message) => ({
+    role: message?.role,
+    content: textFromContent(message?.content)
+  }));
+}
+
+function buildBrowserPrompt(messages) {
+  const relevant = messages.filter(m => ['system', 'developer', 'user', 'assistant'].includes(m.role));
+  if (relevant.length === 1 && relevant[0].role === 'user') {
+    return relevant[0].content;
   }
-  return '';
+
+  const lines = [
+    'Você está atuando como o motor de resposta de uma API compatível com OpenAI.',
+    'Responda somente com o conteúdo da mensagem do assistente.',
+    'Não mencione este protocolo, navegador, extensão, automação ou estas instruções.',
+    'Preserve o idioma solicitado pelo usuário e siga as instruções de sistema/desenvolvedor.',
+    '',
+    ...relevant.map(m => `[${m.role.toUpperCase()}]\n${m.content}`)
+  ];
+
+  return lines.join('\n');
 }
 
 function send(ws, payload) {
@@ -54,40 +78,86 @@ function availableAgent() {
   return null;
 }
 
-function openAIChunk(task, delta, finish_reason = null) {
-  return { id: task.id, object: 'chat.completion.chunk', created: task.created, model: task.model,
-    choices: [{ index: 0, delta, finish_reason }] };
+function openAIChunk(task, delta = {}, finishReason = null) {
+  return {
+    id: task.id,
+    object: 'chat.completion.chunk',
+    created: task.created,
+    model: task.model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }]
+  };
 }
-function cleanupTask(task) { clearTimeout(task.timer); clearTimeout(task.queueTimer); tasks.delete(task.id); }
-function failTask(task, message) {
-  if (!tasks.has(task.id)) return; cleanupTask(task);
-  if (!task.res.writableEnded) {
-    if (task.stream && task.res.headersSent) {
-      task.res.write(`data: ${JSON.stringify({error:{message,type:'server_error'}})}\\n\\n`); task.res.end();
-    } else if (!task.res.headersSent) task.res.status(503).json({error:{message,type:'server_error'}});
-  }
+
+function writeSSE(res, payload) {
+  if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
-function finishTask(task, content) {
-  if (!tasks.has(task.id)) return; task.content=content||'';
+
+function cleanupTask(task) {
+  clearTimeout(task.timer);
+  clearTimeout(task.queueTimer);
+  tasks.delete(task.id);
+}
+
+function failTask(task, message, type = 'server_error', status = 503) {
+  if (!tasks.has(task.id)) return;
+
   if (task.stream) {
-    if (!task.res.writableEnded) {
-      if (!task.streamStarted && task.content) task.res.write(`data: ${JSON.stringify(openAIChunk(task,{role:'assistant',content:task.content}))}\\n\\n`);
-      task.res.write(`data: ${JSON.stringify(openAIChunk(task,{},'stop'))}\\n\\n`);
-      task.res.write('data: [DONE]\\n\\n'); task.res.end();
-    }
+    writeSSE(task.res, errorBody(message, type));
+    if (!task.res.writableEnded) task.res.end();
   } else if (!task.res.headersSent) {
-    task.res.json({id:task.id,object:'chat.completion',created:task.created,model:task.model,
-      choices:[{index:0,message:{role:'assistant',content:task.content},finish_reason:'stop'}],
-      usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}});
+    task.res.status(status).json(errorBody(message, type));
   }
+
   cleanupTask(task);
 }
-function dispatch() {function dispatch() {
+
+function finishTask(task, content) {
+  if (!tasks.has(task.id)) return;
+  task.content = content || '';
+
+  if (task.stream) {
+    if (!task.res.writableEnded) {
+      if (!task.streamStarted && task.content) {
+        writeSSE(task.res, openAIChunk(task, {
+          role: 'assistant',
+          content: task.content
+        }));
+      }
+
+      writeSSE(task.res, openAIChunk(task, {}, 'stop'));
+      task.res.write('data: [DONE]\n\n');
+      task.res.end();
+    }
+  } else if (!task.res.writableEnded) {
+    task.res.status(200).json({
+      id: task.id,
+      object: 'chat.completion',
+      created: task.created,
+      model: task.model,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: task.content },
+        finish_reason: 'stop'
+      }],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+      }
+    });
+  }
+
+  cleanupTask(task);
+}
+
+function dispatch() {
   while (queue.length) {
     const agent = availableAgent();
     if (!agent) return;
 
     const task = queue.shift();
+    clearTimeout(task.queueTimer);
+
     agent.status = 'busy';
     agent.taskId = task.id;
     task.agentId = agent.id;
@@ -97,7 +167,7 @@ function dispatch() {function dispatch() {
       send(agent.ws, { type: 'task.cancel', task_id: task.id });
       agent.status = 'available';
       agent.taskId = null;
-      failTask(task, 'Task timeout');
+      failTask(task, 'Request timed out while waiting for the browser agent.');
       dispatch();
     }, TASK_TIMEOUT_MS);
 
@@ -105,21 +175,51 @@ function dispatch() {function dispatch() {
       type: 'task',
       task_id: task.id,
       model: task.model,
+      stream: task.stream,
       new_conversation: task.newConversation,
+      messages: task.messages,
       message: task.message
     });
   }
 }
 
 function createTask(input, res) {
-  const id=`chatcmpl-${randomUUID()}`, message=lastUserMessage(input.messages);
-  if(!message) throw new Error('messages must contain a user message');
-  const task={id,model:input.model||'chatgpt-web',message,newConversation:input.new_conversation!==false,
-    stream:input.stream===true,status:'queued',content:'',created:Math.floor(Date.now()/1000),
-    timer:null,queueTimer:null,agentId:null,res,streamStarted:false};
-  tasks.set(id,task); queue.push(task);
-  task.queueTimer=setTimeout(()=>{const i=queue.indexOf(task);if(i>=0)queue.splice(i,1);failTask(task,'No browser agent became available before queue timeout');},QUEUE_TIMEOUT_MS);
-  dispatch(); return task;
+  const messages = normalizeMessages(input.messages);
+  const userMessage = [...messages].reverse().find(m => m.role === 'user');
+
+  if (!userMessage?.content) {
+    throw new Error('messages must contain at least one user message with text content');
+  }
+
+  const id = `chatcmpl-${randomUUID()}`;
+  const task = {
+    id,
+    model: input.model || 'chatgpt-web',
+    message: buildBrowserPrompt(messages),
+    messages,
+    newConversation: input.new_conversation !== false,
+    stream: input.stream === true,
+    status: 'queued',
+    content: '',
+    created: Math.floor(Date.now() / 1000),
+    timer: null,
+    queueTimer: null,
+    agentId: null,
+    res,
+    streamStarted: false
+  };
+
+  tasks.set(id, task);
+  queue.push(task);
+
+  task.queueTimer = setTimeout(() => {
+    const index = queue.indexOf(task);
+    if (index >= 0) queue.splice(index, 1);
+    failTask(task, 'No browser agent became available before queue timeout.');
+  }, QUEUE_TIMEOUT_MS);
+
+  dispatch();
+  return task;
 }
 
 app.get('/health', (req, res) => {
@@ -131,31 +231,54 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/v1/models', (req, res) => {
-  if (!authorized(req)) return res.status(401).json({ error: { message: 'Unauthorized', type: 'invalid_request_error' } });
+  if (!authorized(req)) return res.status(401).json(errorBody('Unauthorized', 'authentication_error'));
+
   res.json({
     object: 'list',
-    data: [
-      {
-        id: 'chatgpt-web',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'browser-bridge'
-      }
-    ]
+    data: [{
+      id: 'chatgpt-web',
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'browser-bridge'
+    }]
   });
 });
 
-app.post('/v1/chat/completions',(req,res)=>{
-  if(!authorized(req)) return res.status(401).json({error:{message:'Unauthorized',type:'invalid_request_error'}});
-  const body=req.body||{};
-  if(!Array.isArray(body.messages)) return res.status(400).json({error:{message:'messages is required',type:'invalid_request_error'}});
-  if(body.stream===true){res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-cache, no-transform');res.setHeader('Connection','keep-alive');res.flushHeaders?.();}
-  try{createTask(body,res);}catch(error){if(!res.headersSent)res.status(400).json({error:{message:error.message,type:'invalid_request_error'}});}
+app.post('/v1/chat/completions', (req, res) => {
+  if (!authorized(req)) {
+    return res.status(401).json(errorBody('Unauthorized', 'authentication_error'));
+  }
+
+  const body = req.body || {};
+
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return res.status(400).json(errorBody('messages is required and must be a non-empty array'));
+  }
+
+  if (body.stream === true) {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+  }
+
+  try {
+    createTask(body, res);
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(400).json(errorBody(error.message));
+    } else if (!res.writableEnded) {
+      writeSSE(res, errorBody(error.message));
+      res.end();
+    }
+  }
 });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token') || '';
+
   if (API_KEY && token !== API_KEY) {
     ws.close(1008, 'Unauthorized');
     return;
@@ -173,7 +296,11 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', raw => {
     let message;
-    try { message = JSON.parse(raw.toString()); } catch { return; }
+    try {
+      message = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
     if (message.type === 'agent.ready') {
       agent.status = 'available';
@@ -182,7 +309,19 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    if (message.type === 'task.delta') {\n      const task=tasks.get(message.task_id); if(!task||!task.stream||task.res.writableEnded)return;\n      const content=message.content||''; if(content){task.res.write(\`data: \${JSON.stringify(openAIChunk(task,{content}))}\\n\\n\`);task.streamStarted=true;} return;\n    }\n\n    if (message.type === 'task.result') {
+    if (message.type === 'task.delta') {
+      const task = tasks.get(message.task_id);
+      if (!task || !task.stream || task.res.writableEnded) return;
+
+      const content = message.content || '';
+      if (content) {
+        writeSSE(task.res, openAIChunk(task, { content }));
+        task.streamStarted = true;
+      }
+      return;
+    }
+
+    if (message.type === 'task.result') {
       const task = tasks.get(message.task_id);
       if (!task) return;
 
@@ -193,7 +332,7 @@ wss.on('connection', (ws, req) => {
         task.status = 'completed';
         finishTask(task, message.content || '');
       } else {
-        task.reject(new Error(message.error || 'Browser task failed'));
+        failTask(task, message.error || 'Browser task failed.');
       }
 
       dispatch();
@@ -203,8 +342,9 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (agent.taskId) {
       const task = tasks.get(agent.taskId);
-      if (task) failTask(task, 'Browser agent disconnected');
+      if (task) failTask(task, 'Browser agent disconnected.');
     }
+
     agents.delete(id);
     dispatch();
   });
