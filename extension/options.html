@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>ChatGPT Web Bridge - Configurações</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:0 20px}
+label{display:block;margin:16px 0 6px;font-weight:600}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd5e1;border-radius:7px}
+button{margin-top:20px;padding:10px 18px;border:0;border-radius:7px;cursor:pointer}
+#result{margin-top:15px}
+</style>
+</head>
+<body>
+<h1>ChatGPT Web Bridge</h1>
+<p>Configure o servidor que distribui as tarefas para esta extensão.</p>
+<label>URL do servidor</label>
+<input id="serverUrl" placeholder="http://localhost:8787">
+<label>Token</label>
+<input id="token" type="password" placeholder="Opcional">
+<button id="save">Salvar</button>
+<div id="result"></div>
+<script src="options.js"></script>
+</body>
+</html>
