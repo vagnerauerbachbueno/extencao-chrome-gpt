@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>ChatGPT Web Bridge</title>
+<style>
+body{font-family:Arial,sans-serif;width:300px;padding:16px;margin:0}
+h3{margin:0 0 12px}
+.status{padding:10px;border-radius:8px;background:#f1f5f9;margin-bottom:12px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#999;margin-right:6px}
+button{width:100%;padding:9px;border:0;border-radius:7px;cursor:pointer}
+small{color:#64748b}
+</style>
+</head>
+<body>
+<h3>ChatGPT Web Bridge</h3>
+<div class="status"><span id="dot" class="dot"></span><span id="status">Verificando...</span></div>
+<small id="server"></small>
+<p><button id="options">Configurações</button></p>
+<script src="popup.js"></script>
+</body>
+</html>
