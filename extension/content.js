@@ -6,7 +6,8 @@ function isVisible(el) {
   if (!el) return false;
   const r = el.getBoundingClientRect();
   const s = getComputedStyle(el);
-  return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  return r.width > 0 && r.height > 0 &&
+    s.visibility !== 'hidden' && s.display !== 'none';
 }
 
 function findComposer() {
@@ -27,7 +28,11 @@ function setComposerValue(element, text) {
   element.focus();
 
   if (element.tagName === 'TEXTAREA') {
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value'
+    )?.set;
+
     setter?.call(element, text);
   } else {
     element.textContent = text;
@@ -38,6 +43,7 @@ function setComposerValue(element, text) {
     inputType: 'insertText',
     data: text
   }));
+
   element.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
@@ -69,6 +75,7 @@ function findNewChatButton() {
 
 async function startNewConversation() {
   const button = findNewChatButton();
+
   if (button) {
     button.click();
     await sleep(1200);
@@ -76,6 +83,7 @@ async function startNewConversation() {
   }
 
   const home = [...document.querySelectorAll('a[href="/"]')].find(isVisible);
+
   if (home) {
     home.click();
     await sleep(1200);
@@ -100,21 +108,36 @@ function extractMessages() {
   return [...new Set(texts)];
 }
 
-function sendDelta(taskId, content) { if(content) chrome.runtime.sendMessage({type:'task.delta',task_id:taskId,content}).catch(()=>{}); }\n\nasync function waitForAssistantResponse(before, taskId, stream) {
+function sendDelta(taskId, content) {
+  if (!content) return;
+
+  chrome.runtime.sendMessage({
+    type: 'task.delta',
+    task_id: taskId,
+    content
+  }).catch(() => {});
+}
+
+async function waitForAssistantResponse(before, taskId, stream) {
   let stableText = '';
   let stableCount = 0;
+  let lastSent = '';
 
-  let lastSent='';
   for (let i = 0; i < 180; i++) {
     await sleep(stream ? 500 : 1000);
 
     const messages = extractMessages();
     const candidates = messages.filter(x => !before.includes(x));
     const latest = candidates[candidates.length - 1] || '';
-    if(stream && latest && latest.length>lastSent.length && latest.startsWith(lastSent)){sendDelta(taskId,latest.slice(lastSent.length));lastSent=latest;}
 
-    if (latest && latest === stableText) stableCount++;
-    else {
+    if (stream && latest.length > lastSent.length && latest.startsWith(lastSent)) {
+      sendDelta(taskId, latest.slice(lastSent.length));
+      lastSent = latest;
+    }
+
+    if (latest && latest === stableText) {
+      stableCount++;
+    } else {
       stableText = latest;
       stableCount = 0;
     }
@@ -126,7 +149,9 @@ function sendDelta(taskId, content) { if(content) chrome.runtime.sendMessage({ty
       return latest;
     }
 
-    if (latest && stableCount >= 3) return latest;
+    if (latest && stableCount >= 3) {
+      return latest;
+    }
   }
 
   throw new Error('Timeout waiting for ChatGPT response');
@@ -137,17 +162,22 @@ async function executeTask(message, newConversation, taskId, stream) {
   running = true;
 
   try {
-    if (newConversation) await startNewConversation();
+    if (newConversation) {
+      await startNewConversation();
+    }
 
     const before = extractMessages();
     const composer = findComposer();
 
-    if (!composer) throw new Error('ChatGPT composer not found. Verify chatgpt.com is loaded.');
+    if (!composer) {
+      throw new Error('ChatGPT composer not found. Verify chatgpt.com is loaded.');
+    }
 
     setComposerValue(composer, message);
     await sleep(300);
 
     const send = findSendButton();
+
     if (send) {
       send.click();
     } else {
@@ -160,8 +190,8 @@ async function executeTask(message, newConversation, taskId, stream) {
       }));
     }
 
-    const content = await waitForAssistantResponse(before,taskId,stream);
-    return { ok: true, content };
+    const response = await waitForAssistantResponse(before, taskId, stream);
+    return { ok: true, content: response };
   } finally {
     running = false;
   }
@@ -170,9 +200,17 @@ async function executeTask(message, newConversation, taskId, stream) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'execute_task') return;
 
-  executeTask(message.message, message.new_conversation, message.task_id, message.stream === true)
+  executeTask(
+    message.message,
+    message.new_conversation,
+    message.task_id,
+    message.stream === true
+  )
     .then(sendResponse)
-    .catch(error => sendResponse({ ok: false, error: error.message }));
+    .catch(error => sendResponse({
+      ok: false,
+      error: error.message
+    }));
 
   return true;
 });
