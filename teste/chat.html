@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Teste de Integração - ChatGPT Web Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #151e32;
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --user-msg: #0369a1;
+      --assistant-msg: #1e293b;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+    }
+
+    .main-grid {
+      width: 100%;
+      max-width: 1200px;
+      height: 94vh;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 16px;
+    }
+
+    @media (max-width: 860px) {
+      .main-grid { grid-template-columns: 1fr; height: auto; }
+    }
+
+    .chat-panel {
+      display: flex;
+      flex-direction: column;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .header {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(11, 15, 25, 0.6);
+    }
+
+    .header h1 { font-size: 1.05rem; font-weight: 700; }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 6px var(--danger);
+      transition: all 0.3s ease;
+    }
+
+    .status-dot.active {
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+    }
+
+    .config-bar {
+      padding: 10px 20px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--card-border);
+      background: rgba(2, 6, 23, 0.3);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .config-bar input[type="text"] {
+      background: rgba(11, 15, 25, 0.7);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 5px 8px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      outline: none;
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .config-bar label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+
+    .chat-area {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .message {
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.5;
+      font-size: 0.92rem;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user-msg);
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--assistant-msg);
+      border: 1px solid var(--card-border);
+      border-bottom-left-radius: 3px;
+    }
+
+    .message.system-note {
+      align-self: center;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      border: 1px dashed var(--card-border);
+      padding: 6px 12px;
+      border-radius: 6px;
+    }
+
+    .composer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--card-border);
+      background: rgba(11, 15, 25, 0.5);
+      display: flex;
+      gap: 10px;
+    }
+
+    .composer textarea {
+      flex: 1;
+      background: rgba(11, 15, 25, 0.8);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: none;
+      min-height: 44px;
+      max-height: 120px;
+      outline: none;
+    }
+
+    .composer textarea:focus { border-color: var(--accent); }
+
+    .btn-send {
+      background: var(--accent);
+      color: #0b0f19;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 18px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Side Panel Logs */
+    .log-panel {
+      display: flex;
+      flex-direction: column;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .log-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--card-border);
+      background: rgba(11, 15, 25, 0.6);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .btn-clear {
+      background: transparent;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+
+    .log-body {
+      flex: 1;
+      padding: 12px;
+      overflow-y: auto;
+      font-family: 'Consolas', monospace;
+      font-size: 0.76rem;
+      color: #cbd5e1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #080d1a;
+    }
+
+    .log-entry {
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    .log-entry.info { border-left: 3px solid var(--accent); }
+    .log-entry.success { border-left: 3px solid var(--success); }
+    .log-entry.warn { border-left: 3px solid var(--warning); color: #fde047; }
+    .log-entry.error { border-left: 3px solid var(--danger); color: #fca5a5; }
+    .log-time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; }
+  </style>
+</head>
+<body>
+
+  <div class="main-grid">
+    <!-- Chat Principal -->
+    <div class="chat-panel">
+      <div class="header">
+        <h1>ChatGPT Web Bridge Test</h1>
+        <div class="status-badge">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">Verificando...</span>
+        </div>
+      </div>
+
+      <div class="config-bar">
+        <span>URL:</span>
+        <input type="text" id="apiUrl" value="https://vagner.defence.com.br" />
+        <label><input type="checkbox" id="streamToggle" checked /> Stream</label>
+        <label><input type="checkbox" id="newConvToggle" checked /> Novo Chat</label>
+        <button id="btnCheck" style="padding:3px 8px;border-radius:5px;background:#334155;color:#fff;border:none;cursor:pointer;">Checar</button>
+      </div>
+
+      <div class="chat-area" id="chatArea">
+        <div class="message system-note">
+          Interface pronta com monitoramento em tempo real de logs e eventos da API.
+        </div>
+      </div>
+
+      <div class="composer">
+        <textarea id="promptInput" rows="1" placeholder="Envie sua mensagem... (Enter para enviar)"></textarea>
+        <button id="btnSend" class="btn-send">Enviar</button>
+      </div>
+    </div>
+
+    <!-- Painel de Logs e Diagnóstico -->
+    <div class="log-panel">
+      <div class="log-header">
+        <span>Console de Diagnóstico</span>
+        <button id="btnClearLogs" class="btn-clear">Limpar</button>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </div>
+  </div>
+
+  <script>
+    const apiUrlInput = document.getElementById('apiUrl');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const chatArea = document.getElementById('chatArea');
+    const promptInput = document.getElementById('promptInput');
+    const btnSend = document.getElementById('btnSend');
+    const btnCheck = document.getElementById('btnCheck');
+    const btnClearLogs = document.getElementById('btnClearLogs');
+    const logBody = document.getElementById('logBody');
+    const streamToggle = document.getElementById('streamToggle');
+    const newConvToggle = document.getElementById('newConvToggle');
+
+    const conversationHistory = [];
+
+    function log(message, type = 'info') {
+      const now = new Date().toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = `log-entry ${type}`;
+      div.innerHTML = `<span class="log-time">[${now}]</span> ${message}`;
+      logBody.appendChild(div);
+      logBody.scrollTop = logBody.scrollHeight;
+    }
+
+    btnClearLogs.onclick = () => { logBody.innerHTML = ''; };
+
+    async function checkHealth() {
+      const base = apiUrlInput.value.replace(/\/$/, '');
+      try {
+        const start = performance.now();
+        const res = await fetch(`${base}/health`);
+        const duration = Math.round(performance.now() - start);
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const count = data.agents ? data.agents.length : 0;
+
+        statusDot.className = 'status-dot active';
+        statusText.textContent = `Online (${count} agente${count === 1 ? '' : 's'})`;
+
+        if (count === 0) {
+          log(`Servidor online (${duration}ms), mas NENHUM agente/extensão conectado ainda.`, 'warn');
+        }
+      } catch (err) {
+        statusDot.className = 'status-dot';
+        statusText.textContent = `Offline / Erro`;
+        log(`Falha no healthcheck: ${err.message}`, 'error');
+      }
+    }
+
+    btnCheck.addEventListener('click', () => {
+      log('Verificando status do servidor manualmente...', 'info');
+      checkHealth();
+    });
+
+    setInterval(checkHealth, 5000);
+    checkHealth();
+
+    function addMessage(role, text) {
+      const el = document.createElement('div');
+      el.className = `message ${role}`;
+      el.textContent = text;
+      chatArea.appendChild(el);
+      chatArea.scrollTop = chatArea.scrollHeight;
+      return el;
+    }
+
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    btnSend.addEventListener('click', sendMessage);
+
+    async function sendMessage() {
+      const text = promptInput.value.trim();
+      if (!text) return;
+
+      const base = apiUrlInput.value.replace(/\/$/, '');
+      const isStream = streamToggle.checked;
+      const isNewConv = newConvToggle.checked;
+
+      promptInput.value = '';
+      btnSend.disabled = true;
+
+      addMessage('user', text);
+      conversationHistory.push({ role: 'user', content: text });
+
+      log(`Enviando prompt: "${text.slice(0, 30)}..." (stream: ${isStream})`, 'info');
+      const assistantMsgEl = addMessage('assistant', 'Aguardando resposta do ChatGPT...');
+      const startTime = performance.now();
+
+      try {
+        const payload = {
+          model: 'chatgpt-web',
+          stream: isStream,
+          new_conversation: isNewConv,
+          messages: conversationHistory
+        };
+
+        const res = await fetch(`${base}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData?.error?.message || `Erro HTTP ${res.status}`);
+        }
+
+        if (isStream) {
+          assistantMsgEl.textContent = '';
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let fullContent = '';
+          let buffer = '';
+          let chunksCount = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || !trimmed.startsWith('data:')) continue;
+              const dataStr = trimmed.replace(/^data:\s*/, '');
+              if (dataStr === '[DONE]') {
+                log('Stream concluído [DONE]', 'success');
+                break;
+              }
+
+              try {
+                const parsed = JSON.parse(dataStr);
+                const delta = parsed.choices?.[0]?.delta?.content || '';
+                if (delta) {
+                  chunksCount++;
+                  fullContent += delta;
+                  assistantMsgEl.textContent = fullContent;
+                  chatArea.scrollTop = chatArea.scrollHeight;
+                }
+              } catch (e) {}
+            }
+          }
+
+          const elapsed = Math.round((performance.now() - startTime) / 1000);
+          log(`Recebidos ${chunksCount} fragmentos em ${elapsed}s`, 'success');
+          conversationHistory.push({ role: 'assistant', content: fullContent });
+
+        } else {
+          const data = await res.json();
+          const reply = data.choices?.[0]?.message?.content || 'Sem conteúdo recebido.';
+          const elapsed = Math.round((performance.now() - startTime) / 1000);
+
+          assistantMsgEl.textContent = reply;
+          conversationHistory.push({ role: 'assistant', content: reply });
+          log(`Resposta recebida em ${elapsed}s com sucesso!`, 'success');
+          chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+      } catch (err) {
+        const elapsed = Math.round((performance.now() - startTime) / 1000);
+        assistantMsgEl.textContent = `❌ Erro: ${err.message}`;
+        assistantMsgEl.style.borderColor = 'var(--danger)';
+        log(`Erro após ${elapsed}s: ${err.message}`, 'error');
+      } finally {
+        btnSend.disabled = false;
+        promptInput.focus();
+      }
+    }
+  </script>
+</body>
+</html>

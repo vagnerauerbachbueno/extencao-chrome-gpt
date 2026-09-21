@@ -1,4 +1,4 @@
-const defaults = { serverUrl: 'http://localhost:8787', token: '' };
+const defaults = { serverUrl: 'https://vagner.defence.com.br', token: '' };
 
 async function load() {
   const cfg = await chrome.storage.local.get(defaults);

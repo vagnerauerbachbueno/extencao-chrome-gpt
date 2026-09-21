@@ -1,11 +1,12 @@
 const DEFAULTS = {
-  serverUrl: 'http://localhost:8787',
+  serverUrl: 'https://vagner.defence.com.br',
   token: ''
 };
 
 let socket = null;
 let reconnectTimer = null;
 let connecting = false;
+let pingInterval = null;
 
 async function settings() {
   return await chrome.storage.local.get(DEFAULTS);
@@ -17,35 +18,54 @@ async function connect() {
 
   const cfg = await settings();
   const base = cfg.serverUrl.replace(/\/$/, '');
-  const wsUrl = base.replace(/^http/, 'ws') + '/ws' +
+  const wsBase = base.startsWith('https://') 
+    ? base.replace(/^https:\/\//i, 'wss://') 
+    : base.replace(/^http:\/\//i, 'ws://');
+  const wsUrl = wsBase + '/ws' +
     (cfg.token ? `?token=${encodeURIComponent(cfg.token)}` : '');
 
   try {
+    console.log('[ChatGPT-Bridge] Conectando ao WebSocket:', wsUrl);
     socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
+      console.log('[ChatGPT-Bridge] ✅ WebSocket conectado ao servidor!');
       connecting = false;
       socket.send(JSON.stringify({ type: 'agent.ready' }));
       broadcast({ type: 'connection', connected: true });
+
+      clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 15000);
     };
 
     socket.onmessage = async event => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
+      console.log('[ChatGPT-Bridge] Mensagem recebida do servidor:', msg.type);
       if (msg.type === 'task') await handleTask(msg);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
+      console.warn('[ChatGPT-Bridge] ⚠️ WebSocket fechado. Código:', event.code, 'Motivo:', event.reason);
       connecting = false;
       socket = null;
+      clearInterval(pingInterval);
       broadcast({ type: 'connection', connected: false });
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 3000);
     };
 
-    socket.onerror = () => {};
-  } catch {
+    socket.onerror = (err) => {
+      console.error('[ChatGPT-Bridge] ❌ Erro no WebSocket:', err);
+    };
+  } catch (err) {
+    console.error('[ChatGPT-Bridge] Exceção ao conectar:', err);
     connecting = false;
+    clearInterval(pingInterval);
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 3000);
   }
@@ -114,10 +134,23 @@ function waitForTab(tabId) {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set(DEFAULTS);
+  chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
   connect();
 });
 
-chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onStartup.addListener(() => {
+  chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
+  connect();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepAlive') {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      console.log('[ChatGPT-Bridge] KeepAlive alarme disparado: reconectando WebSocket...');
+      connect();
+    }
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'get_status') {

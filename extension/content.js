@@ -12,19 +12,23 @@ function isVisible(el) {
 
 function findComposer() {
   const selectors = [
-    'textarea',
+    '#prompt-textarea',
+    'textarea[data-id="root"]',
+    'div[id="prompt-textarea"]',
     'div[contenteditable="true"][role="textbox"]',
-    'div[contenteditable="true"]'
+    'div[contenteditable="true"]',
+    'textarea'
   ];
 
   const candidates = selectors
     .flatMap(selector => [...document.querySelectorAll(selector)])
     .filter(isVisible);
 
-  return candidates[candidates.length - 1] || null;
+  return candidates[0] || null;
 }
 
 function setComposerValue(element, text) {
+  console.log('[ChatGPT-Bridge Content] Inserindo texto no composer:', text.slice(0, 40) + '...');
   element.focus();
 
   if (element.tagName === 'TEXTAREA') {
@@ -32,10 +36,10 @@ function setComposerValue(element, text) {
       HTMLTextAreaElement.prototype,
       'value'
     )?.set;
-
     setter?.call(element, text);
   } else {
-    element.textContent = text;
+    // Para div contenteditable (ProseMirror do ChatGPT)
+    element.innerHTML = `<p>${text.replace(/\n/g, '<br>')}</p>`;
   }
 
   element.dispatchEvent(new InputEvent('input', {
@@ -49,10 +53,12 @@ function setComposerValue(element, text) {
 
 function findSendButton() {
   const selectors = [
+    'button[data-testid="send-button"]',
     'button[data-testid*="send"]',
     'button[aria-label*="Send"]',
     'button[aria-label*="Enviar"]',
-    'button[type="submit"]'
+    'button[type="submit"]',
+    'form button'
   ];
 
   return selectors

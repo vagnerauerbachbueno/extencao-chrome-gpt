@@ -1,0 +1,10 @@
+{
+  "model": "chatgpt-web",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "responda apenas OK"
+    }
+  ]
+}

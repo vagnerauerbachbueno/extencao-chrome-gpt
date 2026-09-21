@@ -122,6 +122,9 @@ function finishTask(task, content) {
           role: 'assistant',
           content: task.content
         }));
+      } else if (task.streamStarted && task.sentLength < task.content.length) {
+        const remaining = task.content.slice(task.sentLength);
+        writeSSE(task.res, openAIChunk(task, { content: remaining }));
       }
 
       writeSSE(task.res, openAIChunk(task, {}, 'stop'));
@@ -153,7 +156,10 @@ function finishTask(task, content) {
 function dispatch() {
   while (queue.length) {
     const agent = availableAgent();
-    if (!agent) return;
+    if (!agent) {
+      console.log(`[${new Date().toLocaleTimeString()}] ⏳ Tarefa na fila, mas nenhum agente disponível no momento (Fila: ${queue.length})`);
+      return;
+    }
 
     const task = queue.shift();
     clearTimeout(task.queueTimer);
@@ -163,7 +169,10 @@ function dispatch() {
     task.agentId = agent.id;
     task.status = 'processing';
 
+    console.log(`[${new Date().toLocaleTimeString()}] 🚀 Enviando tarefa ${task.id} para agente ${agent.id} (stream: ${task.stream})`);
+
     task.timer = setTimeout(() => {
+      console.warn(`[${new Date().toLocaleTimeString()}] ⏰ Timeout da tarefa ${task.id} no agente ${agent.id}`);
       send(agent.ws, { type: 'task.cancel', task_id: task.id });
       agent.status = 'available';
       agent.taskId = null;
@@ -245,7 +254,9 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.post('/v1/chat/completions', (req, res) => {
+  console.log(`[${new Date().toLocaleTimeString()}] 📩 Nova requisição recebida em /v1/chat/completions`);
   if (!authorized(req)) {
+    console.warn('❌ Requisição não autorizada');
     return res.status(401).json(errorBody('Unauthorized', 'authentication_error'));
   }
 
@@ -276,17 +287,23 @@ app.post('/v1/chat/completions', (req, res) => {
 });
 
 wss.on('connection', (ws, req) => {
+  const now = () => new Date().toLocaleTimeString();
+
+  console.log(`[${now()}] Nova conexão WebSocket de ${req.socket.remoteAddress}`);
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token') || '';
 
   if (API_KEY && token !== API_KEY) {
+    console.warn(`[${now()}] Conexão rejeitada: token inválido`);
     ws.close(1008, 'Unauthorized');
     return;
   }
 
-  const id = `agent-${randomUUID()}`;
+  const id = `agent-${randomUUID().slice(0, 8)}`;
   const agent = { id, ws, status: 'available', taskId: null };
   agents.set(id, agent);
+  console.log(`[${now()}] ✅ Agente registrado: ${id}. Total de agentes ativos: ${agents.size}`);
 
   send(ws, {
     type: 'agent.connected',
@@ -299,12 +316,21 @@ wss.on('connection', (ws, req) => {
     try {
       message = JSON.parse(raw.toString());
     } catch {
+      console.error(`[${now()}] Mensagem malformada recebida de ${id}:`, raw.toString());
+      return;
+    }
+
+    console.log(`[${now()}] [WS Recebido de ${id}] Tipo: ${message.type}`, message.task_id ? `(Task: ${message.task_id})` : '');
+
+    if (message.type === 'ping') {
+      send(ws, { type: 'pong' });
       return;
     }
 
     if (message.type === 'agent.ready') {
       agent.status = 'available';
       agent.taskId = null;
+      console.log(`[${now()}] Agente ${id} pronto para receber tarefas.`);
       dispatch();
       return;
     }
@@ -317,6 +343,7 @@ wss.on('connection', (ws, req) => {
       if (content) {
         writeSSE(task.res, openAIChunk(task, { content }));
         task.streamStarted = true;
+        task.sentLength = (task.sentLength || 0) + content.length;
       }
       return;
     }
@@ -329,9 +356,11 @@ wss.on('connection', (ws, req) => {
       agent.taskId = null;
 
       if (message.ok) {
+        console.log(`[${now()}] ✅ Tarefa ${task.id} concluída com sucesso (${(message.content || '').length} caracteres)`);
         task.status = 'completed';
         finishTask(task, message.content || '');
       } else {
+        console.error(`[${now()}] ❌ Tarefa ${task.id} falhou: ${message.error}`);
         failTask(task, message.error || 'Browser task failed.');
       }
 
@@ -339,7 +368,8 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
+    console.warn(`[${now()}] ⚠️ Agente ${id} desconectado (código: ${code}, motivo: ${reason?.toString() || 'sem motivo'}). Restantes: ${agents.size - 1}`);
     if (agent.taskId) {
       const task = tasks.get(agent.taskId);
       if (task) failTask(task, 'Browser agent disconnected.');
@@ -353,5 +383,5 @@ wss.on('connection', (ws, req) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`ChatGPT Web Bridge listening on http://localhost:${PORT}`);
+  console.log(`[${new Date().toLocaleTimeString()}] 🚀 ChatGPT Web Bridge rodando em http://localhost:${PORT}`);
 });
