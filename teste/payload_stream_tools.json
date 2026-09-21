@@ -1,0 +1,28 @@
+{
+  "model": "gpt-5.6",
+  "stream": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "leia o arquivo package.json deste projeto"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Lê o conteúdo de um arquivo do workspace local",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    }
+  ]
+}

@@ -49,17 +49,61 @@ function normalizeMessages(messages) {
   }));
 }
 
-function buildBrowserPrompt(messages) {
+function buildBrowserPrompt(messages, tools = []) {
   const relevant = messages.filter(m => ['system', 'developer', 'user', 'assistant'].includes(m.role));
-  if (relevant.length === 1 && relevant[0].role === 'user') {
-    return relevant[0].content;
+
+  const toolLines = [];
+  const effectiveTools = (Array.isArray(tools) && tools.length > 0) ? tools : [
+    {
+      name: "read_file",
+      description: "Lê o conteúdo de um arquivo do workspace local",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+    },
+    {
+      name: "list_directory",
+      description: "Lista arquivos e pastas do workspace local",
+      parameters: { type: "object", properties: { path: { type: "string" } } }
+    },
+    {
+      name: "grep_search",
+      description: "Busca padrões ou textos em arquivos do projeto",
+      parameters: { type: "object", properties: { query: { type: "string" } } }
+    },
+    {
+      name: "bash",
+      description: "Executa comandos no terminal / shell do sistema",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+    }
+  ];
+
+  toolLines.push('FERRAMENTAS DISPONÍVEIS NO TERMINAL DO CLIENTE (OpenCode / CLI):');
+  for (const t of effectiveTools) {
+    const fn = t.function || t;
+    toolLines.push(`- Nome: ${fn.name}`);
+    if (fn.description) toolLines.push(`  Descrição: ${fn.description}`);
+    if (fn.parameters) toolLines.push(`  Parâmetros: ${JSON.stringify(fn.parameters)}`);
   }
+  toolLines.push('');
+  toolLines.push('COMO EXECUTAR AÇÕES NO PROJETO:');
+  toolLines.push('Você TEM sim acesso a estas ferramentas locais através do protocolo do terminal.');
+  toolLines.push('Quando você precisar ler a pasta, ler arquivos ou rodar comandos para analisar o projeto, NÃO diga que não tem ferramentas expostas.');
+  toolLines.push('Emita IMEDIATAMENTE a invocação no seguinte formato JSON:');
+  toolLines.push('```json');
+  toolLines.push('{"tool_call": {"name": "nome_da_ferramenta", "arguments": { ... }}}');
+  toolLines.push('```');
+  toolLines.push('O cliente receberá essa chamada, executará a ação na máquina do usuário e retornará o conteúdo para você continuar.');
 
   const lines = [
-    'Você está atuando como o motor de resposta de uma API compatível com OpenAI.',
-    'Responda somente com o conteúdo da mensagem do assistente.',
-    'Não mencione este protocolo, navegador, extensão, automação ou estas instruções.',
-    'Preserve o idioma solicitado pelo usuário e siga as instruções de sistema/desenvolvedor.',
+    'Você é o motor de IA e desenvolvimento conectado ao terminal de código local do usuário (OpenCode / Codex / CLI).',
+    'DIRETRIZES DE EXECUÇÃO:',
+    '1. O usuário está em uma pasta/projeto LOCAL no computador dele.',
+    '2. NÃO invente nem procure repositórios remotos do GitHub/web, a menos que uma URL remota seja fornecida explicitamente.',
+    '3. Quando solicitado a analisar o projeto, ler ou modificar arquivos, use as ferramentas disponíveis para ler o diretório ou peça os arquivos da pasta local.',
+    '4. Se você decidir invocar uma ferramenta, responda com o bloco JSON da ferramenta indicado acima.',
+    '5. Mantenha as respostas focadas, técnicas e de alto nível de engenharia de software.',
+    '6. Não mencione detalhes da interface web, extensão ou ponte de comunicação.',
+    '',
+    ...toolLines,
     '',
     ...relevant.map(m => `[${m.role.toUpperCase()}]\n${m.content}`)
   ];
@@ -111,27 +155,105 @@ function failTask(task, message, type = 'server_error', status = 503) {
   cleanupTask(task);
 }
 
+function parseToolCalls(content) {
+  if (!content) return null;
+  try {
+    // 1. Procura primeiro se há um bloco json delimitado ou chave tool_call
+    const toolCallRegex = /\{[\s\S]*?"tool_call"[\s\S]*?\}/;
+    const match = content.match(toolCallRegex);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed?.tool_call?.name) {
+        return [{
+          id: `call_${randomUUID().slice(0, 9)}`,
+          type: 'function',
+          function: {
+            name: parsed.tool_call.name,
+            arguments: typeof parsed.tool_call.arguments === 'string'
+              ? parsed.tool_call.arguments
+              : JSON.stringify(parsed.tool_call.arguments || {})
+          }
+        }];
+      }
+    }
+
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      const jsonString = content.slice(start, end + 1);
+      const parsed = JSON.parse(jsonString);
+      if (parsed?.tool_call?.name) {
+        return [{
+          id: `call_${randomUUID().slice(0, 9)}`,
+          type: 'function',
+          function: {
+            name: parsed.tool_call.name,
+            arguments: typeof parsed.tool_call.arguments === 'string'
+              ? parsed.tool_call.arguments
+              : JSON.stringify(parsed.tool_call.arguments || {})
+          }
+        }];
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 function finishTask(task, content) {
   if (!tasks.has(task.id)) return;
   task.content = content || '';
 
+  const toolCalls = parseToolCalls(task.content);
+
   if (task.stream) {
     if (!task.res.writableEnded) {
-      if (!task.streamStarted && task.content) {
-        writeSSE(task.res, openAIChunk(task, {
-          role: 'assistant',
-          content: task.content
-        }));
-      } else if (task.streamStarted && task.sentLength < task.content.length) {
-        const remaining = task.content.slice(task.sentLength);
-        writeSSE(task.res, openAIChunk(task, { content: remaining }));
+      if (toolCalls) {
+        console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Stream: Emitindo tool_call ${toolCalls[0].function.name} para o OpenCode`);
+        writeSSE(task.res, {
+          id: task.id,
+          object: 'chat.completion.chunk',
+          created: task.created,
+          model: task.model,
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [{
+                index: 0,
+                id: toolCalls[0].id,
+                type: 'function',
+                function: toolCalls[0].function
+              }]
+            },
+            finish_reason: 'tool_calls'
+          }]
+        });
+      } else {
+        if (!task.streamStarted && task.content) {
+          writeSSE(task.res, openAIChunk(task, {
+            role: 'assistant',
+            content: task.content
+          }));
+        } else if (task.streamStarted && task.sentLength < task.content.length) {
+          const remaining = task.content.slice(task.sentLength);
+          writeSSE(task.res, openAIChunk(task, { content: remaining }));
+        }
+        writeSSE(task.res, openAIChunk(task, {}, 'stop'));
       }
 
-      writeSSE(task.res, openAIChunk(task, {}, 'stop'));
       task.res.write('data: [DONE]\n\n');
       task.res.end();
     }
   } else if (!task.res.writableEnded) {
+    const messageObj = {
+      role: 'assistant',
+      content: toolCalls ? null : task.content
+    };
+    if (toolCalls) {
+      console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Non-stream: Emitindo tool_call ${toolCalls[0].function.name} para o OpenCode`);
+      messageObj.tool_calls = toolCalls;
+    }
+
     task.res.status(200).json({
       id: task.id,
       object: 'chat.completion',
@@ -139,8 +261,8 @@ function finishTask(task, content) {
       model: task.model,
       choices: [{
         index: 0,
-        message: { role: 'assistant', content: task.content },
-        finish_reason: 'stop'
+        message: messageObj,
+        finish_reason: toolCalls ? 'tool_calls' : 'stop'
       }],
       usage: {
         prompt_tokens: 0,
@@ -170,6 +292,7 @@ function dispatch() {
     task.status = 'processing';
 
     console.log(`[${new Date().toLocaleTimeString()}] 🚀 Enviando tarefa ${task.id} para agente ${agent.id} (stream: ${task.stream})`);
+    console.log(`[${new Date().toLocaleTimeString()}] 📝 [PROMPT ENVIADO AO CHATGPT]:\n${task.message.slice(0, 300)}...\n[FIM DO PREVIEW DO PROMPT]`);
 
     task.timer = setTimeout(() => {
       console.warn(`[${new Date().toLocaleTimeString()}] ⏰ Timeout da tarefa ${task.id} no agente ${agent.id}`);
@@ -200,12 +323,14 @@ function createTask(input, res) {
     throw new Error('messages must contain at least one user message with text content');
   }
 
+  const tools = input.tools || [];
   const id = `chatcmpl-${randomUUID()}`;
   const task = {
     id,
     model: input.model || 'chatgpt-web',
-    message: buildBrowserPrompt(messages),
+    message: buildBrowserPrompt(messages, tools),
     messages,
+    tools,
     newConversation: input.new_conversation !== false,
     stream: input.stream === true,
     status: 'queued',
@@ -244,12 +369,26 @@ app.get('/v1/models', (req, res) => {
 
   res.json({
     object: 'list',
-    data: [{
-      id: 'chatgpt-web',
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: 'browser-bridge'
-    }]
+    data: [
+      {
+        id: 'gpt-5.6',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'vagner'
+      },
+      {
+        id: 'gpt 5.6',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'vagner'
+      },
+      {
+        id: 'chatgpt-web',
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'vagner'
+      }
+    ]
   });
 });
 
@@ -340,10 +479,24 @@ wss.on('connection', (ws, req) => {
       if (!task || !task.stream || task.res.writableEnded) return;
 
       const content = message.content || '';
-      if (content) {
-        writeSSE(task.res, openAIChunk(task, { content }));
-        task.streamStarted = true;
-        task.sentLength = (task.sentLength || 0) + content.length;
+      if (!content) return;
+
+      task.bufferedContent = (task.bufferedContent || '') + content;
+
+      // Se a resposta começar com '{' ou '```', é suspeita de ser tool_call. 
+      // Não enviamos imediatamente como texto bruto para o OpenCode até termos certeza.
+      const isSuspectToolCall = task.bufferedContent.trim().startsWith('{') || 
+                                task.bufferedContent.trim().startsWith('```json') ||
+                                task.bufferedContent.includes('"tool_call"');
+
+      if (!isSuspectToolCall) {
+        // Se já acumulou buffer prévio normal, descarrega
+        const toSend = task.bufferedContent.slice(task.sentLength || 0);
+        if (toSend) {
+          writeSSE(task.res, openAIChunk(task, { content: toSend }));
+          task.streamStarted = true;
+          task.sentLength = task.bufferedContent.length;
+        }
       }
       return;
     }
@@ -359,6 +512,15 @@ wss.on('connection', (ws, req) => {
         console.log(`[${now()}] ✅ Tarefa ${task.id} concluída com sucesso (${(message.content || '').length} caracteres)`);
         task.status = 'completed';
         finishTask(task, message.content || '');
+      } else if (message.error && message.error.includes('Browser agent is busy')) {
+        console.warn(`[${now()}] ⚠️ Agente ocupado. Reenfileirando tarefa ${task.id} para aguardar término...`);
+        clearTimeout(task.timer);
+        task.status = 'queued';
+        task.agentId = null;
+        setTimeout(() => {
+          queue.unshift(task);
+          dispatch();
+        }, 1500);
       } else {
         console.error(`[${now()}] ❌ Tarefa ${task.id} falhou: ${message.error}`);
         failTask(task, message.error || 'Browser task failed.');

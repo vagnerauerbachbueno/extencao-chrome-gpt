@@ -1,0 +1,29 @@
+{
+  "model": "gpt-5.6",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Por favor leia o arquivo package.json deste projeto para analisar as dependências."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Lê o conteúdo de um arquivo local do projeto",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Caminho do arquivo a ser lido"
+            }
+          },
+          "required": ["path"]
+        }
+      }
+    }
+  ]
+}
