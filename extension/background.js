@@ -73,7 +73,8 @@ async function handleTask(task) {
       type: 'execute_task',
       task_id: task.task_id,
       message: task.message,
-      new_conversation: task.new_conversation
+      new_conversation: task.new_conversation,
+      stream: task.stream === true
     });
 
     socket?.send(JSON.stringify({
@@ -123,7 +124,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'reconnect') {
+  if (message.type === 'task.delta') { socket?.send(JSON.stringify({type:'task.delta',task_id:message.task_id,content:message.content||''})); }\n\n  if (message.type === 'reconnect') {
     connect();
     sendResponse({ ok: true });
   }
