@@ -100,16 +100,18 @@ function extractMessages() {
   return [...new Set(texts)];
 }
 
-async function waitForAssistantResponse(before) {
+function sendDelta(taskId, content) { if(content) chrome.runtime.sendMessage({type:'task.delta',task_id:taskId,content}).catch(()=>{}); }\n\nasync function waitForAssistantResponse(before, taskId, stream) {
   let stableText = '';
   let stableCount = 0;
 
+  let lastSent='';
   for (let i = 0; i < 180; i++) {
-    await sleep(1000);
+    await sleep(stream ? 500 : 1000);
 
     const messages = extractMessages();
     const candidates = messages.filter(x => !before.includes(x));
     const latest = candidates[candidates.length - 1] || '';
+    if(stream && latest && latest.length>lastSent.length && latest.startsWith(lastSent)){sendDelta(taskId,latest.slice(lastSent.length));lastSent=latest;}
 
     if (latest && latest === stableText) stableCount++;
     else {
@@ -130,7 +132,7 @@ async function waitForAssistantResponse(before) {
   throw new Error('Timeout waiting for ChatGPT response');
 }
 
-async function executeTask(message, newConversation) {
+async function executeTask(message, newConversation, taskId, stream) {
   if (running) throw new Error('Browser agent is busy');
   running = true;
 
@@ -158,7 +160,7 @@ async function executeTask(message, newConversation) {
       }));
     }
 
-    const content = await waitForAssistantResponse(before);
+    const content = await waitForAssistantResponse(before,taskId,stream);
     return { ok: true, content };
   } finally {
     running = false;
@@ -168,7 +170,7 @@ async function executeTask(message, newConversation) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'execute_task') return;
 
-  executeTask(message.message, message.new_conversation)
+  executeTask(message.message, message.new_conversation, message.task_id, message.stream === true)
     .then(sendResponse)
     .catch(error => sendResponse({ ok: false, error: error.message }));
 
