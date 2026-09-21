@@ -14,9 +14,11 @@ async function settings() {
 async function connect() {
   if (connecting || (socket && socket.readyState === WebSocket.OPEN)) return;
   connecting = true;
+
   const cfg = await settings();
-  const base = cfg.serverUrl.replace(/\\/$/, '');
-  const wsUrl = base.replace(/^http/, 'ws') + '/ws' + (cfg.token ? `?token=${encodeURIComponent(cfg.token)}` : '');
+  const base = cfg.serverUrl.replace(/\/$/, '');
+  const wsUrl = base.replace(/^http/, 'ws') + '/ws' +
+    (cfg.token ? `?token=${encodeURIComponent(cfg.token)}` : '');
 
   try {
     socket = new WebSocket(wsUrl);
@@ -57,6 +59,7 @@ async function findChatTab() {
   const tabs = await chrome.tabs.query({
     url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
   });
+
   return tabs.find(t => t.status === 'complete') || tabs[0] || null;
 }
 
@@ -104,6 +107,7 @@ function waitForTab(tabId) {
         setTimeout(resolve, 1000);
       }
     };
+
     chrome.tabs.onUpdated.addListener(listener);
   });
 }
@@ -124,7 +128,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === 'task.delta') { socket?.send(JSON.stringify({type:'task.delta',task_id:message.task_id,content:message.content||''})); }\n\n  if (message.type === 'reconnect') {
+  if (message.type === 'task.delta') {
+    socket?.send(JSON.stringify({
+      type: 'task.delta',
+      task_id: message.task_id,
+      content: message.content || ''
+    }));
+    return;
+  }
+
+  if (message.type === 'reconnect') {
     connect();
     sendResponse({ ok: true });
   }
