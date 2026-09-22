@@ -5,35 +5,37 @@
 <title>ChatGPT Web Bridge</title>
 <style>
 *{box-sizing:border-box}
-body{font-family:Inter,Arial,sans-serif;width:340px;padding:18px;margin:0;background:linear-gradient(135deg,#0f172a,#1e293b);color:#e2e8f0;overflow:hidden}
-body:before{content:"";position:absolute;width:180px;height:180px;background:radial-gradient(circle,#38bdf8,transparent 70%);top:-80px;right:-60px;animation:pulse 5s infinite;opacity:.35}
-h3{margin:0 0 14px;font-size:18px;letter-spacing:.3px;animation:slide .5s ease}
-.status{padding:14px;border-radius:14px;background:rgba(255,255,255,.08);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.12);margin-bottom:12px;animation:float 3s ease-in-out infinite}
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#64748b;margin-right:8px;box-shadow:0 0 12px currentColor;animation:blink 1.8s infinite}
-button{width:100%;padding:11px;border:0;border-radius:12px;cursor:pointer;background:linear-gradient(90deg,#2563eb,#06b6d4);color:white;font-weight:600;transition:.3s;box-shadow:0 8px 20px rgba(6,182,212,.25)}
-button:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(6,182,212,.4)}
+body{font-family:Inter,Arial,sans-serif;width:340px;padding:18px;margin:0;background:radial-gradient(circle at top,#164e63,#0f172a 55%);color:#e2e8f0;overflow:hidden}
+body:before{content:"";position:absolute;width:220px;height:220px;background:radial-gradient(circle,#38bdf8,transparent 70%);top:-100px;right:-80px;animation:energy 4s infinite;opacity:.35}
+h3{margin:0 0 14px;font-size:18px;animation:enter .6s ease}
+.status{position:relative;padding:16px;border-radius:18px;background:rgba(255,255,255,.08);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.14);margin-bottom:12px;animation:float 3s infinite}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:#64748b;margin-right:8px;box-shadow:0 0 16px currentColor;animation:blink 1.4s infinite}
+.status.busy .dot{background:#22d3ee;animation:corePulse .8s infinite}
+.status.tool .dot{background:#facc15;animation:corePulse .5s infinite}
+.status.done .dot{background:#22c55e}
+button{width:100%;padding:12px;border:0;border-radius:14px;cursor:pointer;background:linear-gradient(90deg,#2563eb,#06b6d4);color:white;font-weight:700;transition:.3s;box-shadow:0 10px 25px rgba(6,182,212,.3)}
+button:hover{transform:translateY(-3px) scale(1.01)}
 small{color:#94a3b8}
+.agent-orb{width:54px;height:54px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#22d3ee,#2563eb);box-shadow:0 0 35px #22d3ee;animation:orb 2s infinite}
 .logs-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-#clearLogs{cursor:pointer;color:#38bdf8;font-size:11px;transition:.2s}
-#clearLogs:hover{color:white;transform:scale(1.05)}
-#logs{max-height:160px;overflow-y:auto;background:rgba(15,23,42,.8);color:#f8fafc;font-family:monospace;font-size:10px;padding:10px;border-radius:10px;word-break:break-all;border:1px solid rgba(255,255,255,.08);animation:fade .8s ease}
-@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
-@keyframes blink{0%,100%{opacity:.4}50%{opacity:1}}
-@keyframes slide{from{opacity:0;transform:translateY(-15px)}to{opacity:1;transform:translateY(0)}}
-@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
-@keyframes fade{from{opacity:0}to{opacity:1}}
+#clearLogs{cursor:pointer;color:#38bdf8;font-size:11px}
+#logs{max-height:160px;overflow-y:auto;background:rgba(15,23,42,.75);color:#f8fafc;font-family:monospace;font-size:10px;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.1)}
+@keyframes energy{50%{transform:scale(1.35)}}
+@keyframes blink{50%{opacity:1}}
+@keyframes corePulse{50%{transform:scale(1.5)}}
+@keyframes orb{50%{transform:rotate(180deg) scale(1.08)}}
+@keyframes float{50%{transform:translateY(-4px)}}
+@keyframes enter{from{opacity:0;transform:translateY(-20px)}}
 </style>
 </head>
 <body>
 <h3>ChatGPT Web Bridge</h3>
-<div class="status"><span id="dot" class="dot"></span><span id="status">Verificando...</span></div>
+<div class="agent-orb"></div>
+<div id="statusBox" class="status"><span id="dot" class="dot"></span><span id="status">Verificando...</span></div>
 <small id="server"></small>
 <p><button id="options">Configurações</button></p>
 <hr style="border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0;">
-<div class="logs-title">
-  <strong>Logs Recentes</strong>
-  <span id="clearLogs">Limpar</span>
-</div>
+<div class="logs-title"><strong>Logs Recentes</strong><span id="clearLogs">Limpar</span></div>
 <div id="logs"></div>
 <script src="popup.js"></script>
 </body>
