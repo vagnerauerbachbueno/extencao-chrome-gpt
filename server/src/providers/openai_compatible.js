@@ -1,3 +1,6 @@
+// Provider OpenAI Compatible
+// Adapter para qualquer API compatível com Chat Completions.
+
 import { normalizeOpenAIResponse } from '../core/ai_gateway.js';
 
 export function createOpenAICompatibleProvider(client) {
