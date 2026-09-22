@@ -106,18 +106,14 @@ function buildBrowserPrompt(messages, tools = []) {
   toolLines.push('```');
 
   const lines = [
-    'Você é o motor de IA e desenvolvimento conectado ao terminal de código local do usuário (OpenCode / Codex / CLI).',
-    'DIRETRIZES DE EXECUÇÃO:',
-    '1. O usuário está em uma pasta/projeto LOCAL no computador dele.',
-    '2. NÃO invente nem procure repositórios remotos do GitHub/web, a menos que uma URL remota seja fornecida explicitamente.',
-    '3. Quando solicitado a analisar o projeto, ler ou modificar arquivos, NUNCA responda dizendo que não tem ferramentas expostas. Dispare IMEDIATAMENTE a ferramenta de listagem de diretório ou leitura de arquivo.',
-    '4. Se você decidir invocar uma ferramenta, responda com o bloco JSON da ferramenta indicado acima.',
-    '5. Mantenha as respostas focadas, técnicas e de alto nível de engenharia de software.',
-    '6. Não mencione detalhes da interface web, extensão ou ponte de comunicação.',
+    ...relevant.map(m => `[${m.role.toUpperCase()}]\n${m.content}`),
     '',
+    '----------------------------------------',
+    'INSTRUÇÃO MANDATÓRIA DE EXECUÇÃO (PRIORIDADE MÁXIMA):',
+    'Você é o motor conectado ao terminal local do usuário. O projeto está na máquina local dele.',
+    'NUNCA responda dizendo que não tem ferramentas expostas ou que o terminal não está disponível.',
     ...toolLines,
-    '',
-    ...relevant.map(m => `[${m.role.toUpperCase()}]\n${m.content}`)
+    'AÇÃO IMEDIATA: Para analisar ou ler o projeto, emita AGORA no início da sua resposta o JSON acima (ex: glob ou read ou bash).'
   ];
 
   return lines.join('\n');
@@ -215,7 +211,31 @@ function finishTask(task, content) {
   if (!tasks.has(task.id)) return;
   task.content = content || '';
 
-  const toolCalls = parseToolCalls(task.content);
+  let toolCalls = parseToolCalls(task.content);
+
+  // Fallback Inteligente: Se o ChatGPT respondeu se recusando ("não consigo executar a análise... ferramenta não disponível"),
+  // nós detectamos essa recusa e forçamos a chamada da ferramenta 'glob' ou 'bash' para o OpenCode executar!
+  if (!toolCalls && task.tools && task.tools.length > 0) {
+    const isRefusal = /não consigo|não foi disponibilizada|ferramenta.*não.*disponível|preciso que a ferramenta/i.test(task.content);
+    if (isRefusal) {
+      console.log(`[${new Date().toLocaleTimeString()}] 💡 ChatGPT hesitou, auto-acionando ferramenta glob para prosseguir a análise!`);
+      const hasGlob = task.tools.some(t => (t.function?.name || t.name) === 'glob');
+      const hasBash = task.tools.some(t => (t.function?.name || t.name) === 'bash');
+      const toolName = hasGlob ? 'glob' : (hasBash ? 'bash' : (task.tools[0].function?.name || task.tools[0].name));
+      const args = toolName === 'glob' 
+        ? { pattern: '**/*' } 
+        : (toolName === 'bash' ? { command: 'Get-ChildItem -Force | Select-Object Mode,Length,LastWriteTime,Name' } : {});
+
+      toolCalls = [{
+        id: `call_${randomUUID().slice(0, 9)}`,
+        type: 'function',
+        function: {
+          name: toolName,
+          arguments: JSON.stringify(args)
+        }
+      }];
+    }
+  }
 
   if (task.stream) {
     if (!task.res.writableEnded) {
@@ -532,7 +552,11 @@ wss.on('connection', (ws, req) => {
                                 task.bufferedContent.includes('"tool_call"') ||
                                 task.bufferedContent.includes('tool_call');
 
-      if (!isSuspectToolCall) {
+      // Se há ferramentas disponíveis na requisição, retemos o stream para permitir que finishTask converta em tool_call caso o modelo emita o JSON ou hesite
+      const hasTools = Array.isArray(task.tools) && task.tools.length > 0;
+      const isRefusal = /não consigo|não foi disponibilizada|ferramenta.*não.*disponível|preciso que a ferramenta/i.test(trimmed);
+
+      if (!isSuspectToolCall && (!hasTools || !isRefusal)) {
         // Se for texto conversacional normal, descarrega via SSE
         const toSend = task.bufferedContent.slice(task.sentLength || 0);
         if (toSend) {
