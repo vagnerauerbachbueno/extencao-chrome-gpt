@@ -3,6 +3,20 @@ const DEFAULTS = {
   token: ''
 };
 
+async function appendLog(category, details) {
+  try {
+    const { bridge_logs = [] } = await chrome.storage.local.get('bridge_logs');
+    bridge_logs.push({
+      timestamp: new Date().toISOString(),
+      category,
+      details: typeof details === 'string' ? details : JSON.stringify(details)
+    });
+    // Mantém no máximo os últimos 200 logs
+    if (bridge_logs.length > 200) bridge_logs.shift();
+    await chrome.storage.local.set({ bridge_logs });
+  } catch (e) {}
+}
+
 let socket = null;
 let reconnectTimer = null;
 let connecting = false;
@@ -91,6 +105,8 @@ async function handleTask(task) {
     await waitForTab(tab.id);
   }
 
+  appendLog('TASK_RECEIVED', { taskId: task.task_id, stream: task.stream, promptPreview: task.message?.slice(0, 120) });
+
   try {
     const response = await chrome.tabs.sendMessage(tab.id, {
       type: 'execute_task',
@@ -100,6 +116,8 @@ async function handleTask(task) {
       stream: task.stream === true
     });
 
+    appendLog('TASK_RESULT', { taskId: task.task_id, ok: response?.ok, responsePreview: response?.content?.slice(0, 150) });
+
     socket?.send(JSON.stringify({
       type: 'task.result',
       task_id: task.task_id,
@@ -108,6 +126,7 @@ async function handleTask(task) {
       error: response?.error || null
     }));
   } catch (error) {
+    appendLog('TASK_ERROR', { taskId: task.task_id, error: error.message });
     socket?.send(JSON.stringify({
       type: 'task.result',
       task_id: task.task_id,

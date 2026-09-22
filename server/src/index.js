@@ -4,6 +4,17 @@ import cors from 'cors';
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const LOG_DIR = path.resolve('logs');
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const LOG_FILE = path.join(LOG_DIR, 'bridge.log');
+
+export function logToFile(type, data) {
+  const line = `[${new Date().toISOString()}] [${type}] ${typeof data === 'string' ? data : JSON.stringify(data)}\n`;
+  fs.appendFile(LOG_FILE, line, () => {});
+}
 
 const PORT = Number(process.env.PORT || 8787);
 const API_KEY = process.env.API_KEY || '';
@@ -210,6 +221,7 @@ function finishTask(task, content) {
     if (!task.res.writableEnded) {
       if (toolCalls) {
         console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Stream: Emitindo tool_call ${toolCalls[0].function.name} para o OpenCode`);
+        logToFile('EMIT_TOOL_CALL', { taskId: task.id, toolCall: toolCalls[0] });
         writeSSE(task.res, {
           id: task.id,
           object: 'chat.completion.chunk',
@@ -307,8 +319,9 @@ function dispatch() {
     task.agentId = agent.id;
     task.status = 'processing';
 
-    console.log(`[${new Date().toLocaleTimeString()}] 🚀 Enviando tarefa ${task.id} para agente ${agent.id} (stream: ${task.stream})`);
-    console.log(`[${new Date().toLocaleTimeString()}] 📝 [PROMPT ENVIADO AO CHATGPT]:\n${task.message.slice(0, 300)}...\n[FIM DO PREVIEW DO PROMPT]`);
+  console.log(`[${new Date().toLocaleTimeString()}] 🚀 Enviando tarefa ${task.id} para agente ${agent.id} (stream: ${task.stream})`);
+  console.log(`[${new Date().toLocaleTimeString()}] 📝 [PROMPT ENVIADO AO CHATGPT]:\n${task.message.slice(0, 300)}...\n[FIM DO PREVIEW DO PROMPT]`);
+  logToFile('DISPATCH', { taskId: task.id, agentId: agent.id, stream: task.stream, prompt: task.message });
 
     task.timer = setTimeout(() => {
       console.warn(`[${new Date().toLocaleTimeString()}] ⏰ Timeout da tarefa ${task.id} no agente ${agent.id}`);
@@ -378,6 +391,14 @@ app.get('/health', (req, res) => {
     ok: true,
     agents: [...agents.values()].map(a => ({ id: a.id, status: a.status })),
     queued: queue.length
+  });
+});
+
+app.get('/logs', (req, res) => {
+  if (!fs.existsSync(LOG_FILE)) return res.type('text/plain').send('Nenhum log gravado ainda.');
+  fs.readFile(LOG_FILE, 'utf8', (err, data) => {
+    if (err) return res.status(500).send('Erro ao ler logs: ' + err.message);
+    res.type('text/plain; charset=utf-8').send(data);
   });
 });
 
@@ -533,6 +554,7 @@ wss.on('connection', (ws, req) => {
       if (message.ok) {
         console.log(`[${now()}] ✅ Tarefa ${task.id} concluída com sucesso (${(message.content || '').length} caracteres)`);
         console.log(`[${now()}] 💬 [RESPOSTA DO CHATGPT]:\n${message.content}\n[FIM DA RESPOSTA]`);
+        logToFile('RESULT', { taskId: task.id, length: (message.content || '').length, content: message.content });
         task.status = 'completed';
         finishTask(task, message.content || '');
       } else if (message.error && message.error.includes('Browser agent is busy')) {
