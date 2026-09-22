@@ -223,9 +223,24 @@ function finishTask(task, content) {
                 index: 0,
                 id: toolCalls[0].id,
                 type: 'function',
-                function: toolCalls[0].function
+                function: {
+                  name: toolCalls[0].function.name,
+                  arguments: toolCalls[0].function.arguments
+                }
               }]
             },
+            finish_reason: null
+          }]
+        });
+
+        writeSSE(task.res, {
+          id: task.id,
+          object: 'chat.completion.chunk',
+          created: task.created,
+          model: task.model,
+          choices: [{
+            index: 0,
+            delta: {},
             finish_reason: 'tool_calls'
           }]
         });
@@ -487,14 +502,17 @@ wss.on('connection', (ws, req) => {
 
       task.bufferedContent = (task.bufferedContent || '') + content;
 
-      // Se a resposta começar com '{' ou '```', é suspeita de ser tool_call. 
-      // Não enviamos imediatamente como texto bruto para o OpenCode até termos certeza.
-      const isSuspectToolCall = task.bufferedContent.trim().startsWith('{') || 
-                                task.bufferedContent.trim().startsWith('```json') ||
-                                task.bufferedContent.includes('"tool_call"');
+      // Se a resposta começar com '{', '```', 'JSON' ou contiver 'tool_call',
+      // é uma chamada de ferramenta. Retemos no buffer para converter no objeto nativo do OpenAI.
+      const trimmed = task.bufferedContent.trim();
+      const isSuspectToolCall = trimmed.startsWith('{') || 
+                                trimmed.startsWith('```') ||
+                                /^json/i.test(trimmed) ||
+                                task.bufferedContent.includes('"tool_call"') ||
+                                task.bufferedContent.includes('tool_call');
 
       if (!isSuspectToolCall) {
-        // Se já acumulou buffer prévio normal, descarrega
+        // Se for texto conversacional normal, descarrega via SSE
         const toSend = task.bufferedContent.slice(task.sentLength || 0);
         if (toSend) {
           writeSSE(task.res, openAIChunk(task, { content: toSend }));
