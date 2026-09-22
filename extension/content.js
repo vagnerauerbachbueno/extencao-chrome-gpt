@@ -85,50 +85,19 @@ async function deleteCurrentConversation() {
     const match = url.match(/\/c\/([a-zA-Z0-9-]+)/);
     const convId = match ? match[1] : null;
 
-    console.log('[ChatGPT-Bridge] Tentando excluir conversa atual:', convId || 'pelo menu');
-
-    // Se temos o ID da conversa na URL, podemos chamar a API interna autenticada do ChatGPT diretamente
     if (convId) {
-      try {
-        await fetch(`https://chatgpt.com/backend-api/conversation/${convId}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ is_visible: false })
-        });
-        console.log('[ChatGPT-Bridge] ✅ Conversa ocultada/excluída via backend-api:', convId);
-      } catch (err) {
-        console.warn('[ChatGPT-Bridge] Falha ao excluir via API, tentando via interface:', err);
-      }
-    }
-
-    // Procura o botão de opções da conversa ativa ou botão de excluir na interface
-    const optionsButton = document.querySelector('nav button[data-testid*="options"], nav [aria-label*="Opções"], nav [aria-label*="Options"]');
-    if (optionsButton && isVisible(optionsButton)) {
-      optionsButton.click();
-      await sleep(400);
-
-      const deleteOption = [...document.querySelectorAll('[role="menuitem"], button')]
-        .find(el => /Excluir|Delete/i.test(el.innerText || el.getAttribute('aria-label') || ''));
-
-      if (deleteOption) {
-        deleteOption.click();
-        await sleep(400);
-
-        const confirmBtn = [...document.querySelectorAll('button')]
-          .find(el => el.classList.contains('btn-danger') || /Excluir|Delete|Confirm/i.test(el.innerText));
-
-        if (confirmBtn) {
-          confirmBtn.click();
-          await sleep(600);
-        }
-      }
+      console.log('[ChatGPT-Bridge] Ocultando conversa atual via API:', convId);
+      await fetch(`https://chatgpt.com/backend-api/conversation/${convId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ is_visible: false })
+      }).catch(() => {});
     }
   } catch (err) {
-    console.error('[ChatGPT-Bridge] Erro ao tentar excluir conversa:', err);
   } finally {
-    // Sempre limpa a tela e volta para um chat novo
+    // Apenas clica em novo chat para resetar a tela sem fechar modais indesejados
     await startNewConversation();
   }
 }
