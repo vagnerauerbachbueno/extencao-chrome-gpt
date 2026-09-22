@@ -1,4 +1,6 @@
 let running = false;
+let bridgeConversationActive = false;
+let turnsSinceReset = 0;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -179,8 +181,8 @@ async function waitForAssistantResponse(beforeCount, taskId, stream) {
   let startedGenerating = false;
 
   // Aguarda até 3 minutos no total
-  for (let i = 0; i < 360; i++) {
-    await sleep(stream ? 400 : 800);
+  for (let i = 0; i < 450; i++) {
+    await sleep(stream ? 250 : 500);
 
     const messages = extractMessages();
     const newMessages = messages.slice(beforeCount);
@@ -206,21 +208,24 @@ async function waitForAssistantResponse(beforeCount, taskId, stream) {
     const composer = findComposer();
     const sendButton = findSendButton();
 
-    // Só encerra se temos certeza que a geração começou e já concluiu
     if (startedGenerating && latest && !generating) {
-      // Se o botão de Stop sumiu e o texto estabilizou por pelo menos 4 checagens (~2s)
-      if (stableCount >= 4) {
-        if (stream && latest.length > lastSent.length) {
-          sendDelta(taskId, latest.slice(lastSent.length));
-        }
+      const t = latest.trim();
+      const looksCompleteJson = t.startsWith('{') && t.endsWith('}') && t.includes('tool_call');
+
+      // JSON de tool_call completo → não espera mais
+      if (looksCompleteJson && stableCount >= 1) {
+        if (stream && latest.length > lastSent.length) sendDelta(taskId, latest.slice(lastSent.length));
         return latest;
       }
 
-      // Se o composer voltou e o botão de envio está pronto de novo
-      if (stableCount >= 3 && composer && (!sendButton || !sendButton.disabled)) {
-        if (stream && latest.length > lastSent.length) {
-          sendDelta(taskId, latest.slice(lastSent.length));
-        }
+      // Texto normal: 2 checagens estáveis (~0,5s) já bastam
+      if (stableCount >= 2) {
+        if (stream && latest.length > lastSent.length) sendDelta(taskId, latest.slice(lastSent.length));
+        return latest;
+      }
+
+      if (stableCount >= 1 && composer && (!sendButton || !sendButton.disabled)) {
+        if (stream && latest.length > lastSent.length) sendDelta(taskId, latest.slice(lastSent.length));
         return latest;
       }
     }
@@ -234,8 +239,18 @@ async function executeTask(message, newConversation, taskId, stream) {
   running = true;
 
   try {
-    if (newConversation) {
-      await startNewConversation();
+    const MAX_TURNS = 40;
+    const needFresh = newConversation === true || !bridgeConversationActive || turnsSinceReset >= MAX_TURNS;
+
+    if (needFresh) {
+      // Limpa o chat anterior só quando realmente troca de conversa
+      if (bridgeConversationActive) {
+        await deleteCurrentConversation();
+      } else {
+        await startNewConversation();
+      }
+      bridgeConversationActive = true;
+      turnsSinceReset = 0;
     }
 
     const beforeCount = extractMessages().length;
@@ -246,7 +261,7 @@ async function executeTask(message, newConversation, taskId, stream) {
     }
 
     setComposerValue(composer, message);
-    await sleep(300);
+    await sleep(200);
 
     const send = findSendButton();
 
@@ -263,19 +278,56 @@ async function executeTask(message, newConversation, taskId, stream) {
     }
 
     const response = await waitForAssistantResponse(beforeCount, taskId, stream);
+    turnsSinceReset++;
 
-    // Exclui a conversa para não acumular lixo no histórico do ChatGPT e reseta para nova aba limpa
-    try {
-      await deleteCurrentConversation();
-    } catch (err) {
-      console.warn('[ChatGPT-Bridge] Erro ao limpar conversa:', err);
-    }
-
+    // Não deleta a cada mensagem — reaproveita a conversa
     return { ok: true, content: response };
   } finally {
     running = false;
   }
 }
+
+async function reportAuthOnce() {
+  try {
+    const res = await fetch('https://chatgpt.com/api/auth/session', {
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    });
+    const raw = await res.text();
+    let data = null;
+    try { data = JSON.parse(raw); } catch { data = null; }
+    const token = data?.accessToken || '';
+    const account = data?.user?.id || data?.auth?.account_id || data?.account_id || '';
+    const prev = await chrome.storage.local.get('chatgpt_access_token');
+    await chrome.storage.local.set({
+      chatgpt_access_token: token,
+      chatgpt_account_id: account,
+      chatgpt_auth_status: token ? 'ok' : (res.ok ? 'no_token' : `http_${res.status}`),
+      chatgpt_auth_at: new Date().toISOString(),
+      chatgpt_auth_preview: (raw || '').slice(0, 80)
+    });
+    if (token && token !== prev.chatgpt_access_token) {
+      chrome.runtime.sendMessage({
+        type: 'auth.chatgpt',
+        access_token: token,
+        account_id: account
+      }).catch(() => {});
+      console.log('[ChatGPT-Bridge Content] accessToken capturado', token.slice(0, 12) + '...');
+    } else if (!token) {
+      console.warn('[ChatGPT-Bridge Content] session sem accessToken', res.status, raw.slice(0, 120));
+    }
+  } catch (e) {
+    console.warn('[ChatGPT-Bridge Content] falha ao capturar accessToken:', e?.message);
+    chrome.storage.local.set({
+      chatgpt_auth_status: 'error',
+      chatgpt_auth_error: e?.message || String(e)
+    }).catch(() => {});
+  }
+}
+
+reportAuthOnce();
+setTimeout(reportAuthOnce, 2000);
+setInterval(reportAuthOnce, 5 * 60 * 1000);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'execute_task') return;

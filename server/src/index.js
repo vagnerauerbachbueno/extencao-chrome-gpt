@@ -6,21 +6,24 @@ import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseToolCalls, isRefusalText, isActionIntentText } from './parser.js';
+import { setChatGPTAuth, getChatGPTAuthState, chatCompletionDirect, resetDirectConversation } from './chatgpt_direct.js';
+import { logToFile, LOG_FILE } from './log.js';
 
-const LOG_DIR = path.resolve('logs');
-if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-const LOG_FILE = path.join(LOG_DIR, 'bridge.log');
-
-export function logToFile(type, data) {
-  const line = `[${new Date().toISOString()}] [${type}] ${typeof data === 'string' ? data : JSON.stringify(data)}\n`;
-  fs.appendFile(LOG_FILE, line, () => {});
-}
+const DIRECT_MODE = process.env.DIRECT_MODE !== '0';
 
 const PORT = Number(process.env.PORT || 8787);
 const API_KEY = process.env.API_KEY || '';
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS || 180000);
 const QUEUE_TIMEOUT_MS = Number(process.env.QUEUE_TIMEOUT_MS || 120000);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+
+if (!API_KEY) {
+  console.warn('[segurança] API_KEY vazia — o endpoint /v1/chat/completions está aberto. Defina API_KEY no .env para uso em produção.');
+}
+if (CORS_ORIGIN === '*' && API_KEY) {
+  console.warn('[segurança] CORS_ORIGIN=* com API_KEY definida. Restrinja CORS_ORIGIN ao domínio do cliente.');
+}
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
@@ -32,6 +35,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 const agents = new Map();
 const tasks = new Map();
 const queue = [];
+let authLogDone = false;
 
 function authorized(req) {
   if (!API_KEY) return true;
@@ -62,58 +66,82 @@ function normalizeMessages(messages) {
 
 function buildBrowserPrompt(messages, tools = []) {
   const relevant = messages.filter(m => ['system', 'developer', 'user', 'assistant'].includes(m.role));
+  const systemish = relevant.filter(m => m.role === 'system' || m.role === 'developer');
+  const dialogue = relevant.filter(m => m.role !== 'system' && m.role !== 'developer');
+  // Limita o histórico: prompt gigante deixa o ChatGPT lento e confuso
+  const cappedDialogue = dialogue.length > 16 ? dialogue.slice(-16) : dialogue;
+  const history = [...systemish, ...cappedDialogue];
+
+  const header = [
+    'CRITICAL — FUNCTION CALLING PROTOCOL (behave exactly like an OpenAI tool-calling API):',
+    'You are the reasoning engine of a local CLI (OpenCode). Tools ARE available — the CLI runs them when you emit tool_call JSON.',
+    'Reply ONLY with JSON when a tool is needed: {"tool_call": {"name": "...", "arguments": {...}}}',
+    '',
+    'FILE CREATION RULE (highest priority):',
+    '- CREATE / WRITE / SAVE file (landing page, script, etc.) → emit write tool_call IMMEDIATELY.',
+    '- NEVER narrate plans, NEVER output file trees in prose, NEVER return file body as plain text.',
+    '- Example: {"tool_call": {"name": "write", "arguments": {"filePath": "index.html", "content": "<!DOCTYPE html>..."}}}',
+    '- Wrong: "Vou criar uma versão..." / Estrutura: ```text ... ```  ← DO NOT DO THIS',
+    '- Right: reply starts with { and is only the tool_call JSON.',
+    '',
+    'NEVER narrate, NEVER say tools/terminal/files are unavailable.',
+    'ANTI-LOOP: never repeat the same tool_call (name+arguments) already used above. After glob/list results → read a specific file. After read → answer or grep.',
+    ''
+  ];
 
   const toolLines = [];
-  const effectiveTools = (Array.isArray(tools) && tools.length > 0) ? tools : [
+  const rawTools = (Array.isArray(tools) && tools.length > 0) ? tools : [
     {
       name: "read_file",
-      description: "Lê o conteúdo de um arquivo do workspace local",
+      description: "Lê arquivo do workspace",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
     },
     {
       name: "list_directory",
-      description: "Lista arquivos e pastas do workspace local",
+      description: "Lista arquivos e pastas",
       parameters: { type: "object", properties: { path: { type: "string" } } }
     },
     {
       name: "grep_search",
-      description: "Busca padrões ou textos em arquivos do projeto",
+      description: "Busca texto no projeto",
       parameters: { type: "object", properties: { query: { type: "string" } } }
     },
     {
       name: "bash",
-      description: "Executa comandos no terminal / shell do sistema",
+      description: "Executa comando no shell",
       parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
     }
   ];
+  // Sem sub-agentes: esconde task/skill/todowrite/question do modelo
+  const BLOCKED = new Set(['task', 'skill', 'todowrite', 'question']);
+  const effectiveTools = rawTools.filter(t => {
+    const name = t.function?.name || t.name || '';
+    return !BLOCKED.has(name);
+  });
 
-  toolLines.push('FERRAMENTAS DISPONÍVEIS NO TERMINAL DO CLIENTE (OpenCode / CLI):');
+  toolLines.push('TOOLS (name → short description → arg keys):');
   for (const t of effectiveTools) {
     const fn = t.function || t;
-    toolLines.push(`- Nome: ${fn.name}`);
-    if (fn.description) toolLines.push(`  Descrição: ${fn.description}`);
-    if (fn.parameters) toolLines.push(`  Parâmetros: ${JSON.stringify(fn.parameters)}`);
+    const desc = String(fn.description || '').split('\n')[0].replace(/\s+/g, ' ').slice(0, 100);
+    const props = fn.parameters?.properties ? Object.keys(fn.parameters.properties).join(',') : '';
+    toolLines.push(`- ${fn.name}: ${desc}${props ? ` (${props})` : ''}`);
   }
   toolLines.push('');
-  toolLines.push('REGRA FUNDAMENTAL DE EXECUÇÃO DE FERRAMENTAS:');
-  toolLines.push('1. Você é o cérebro que comanda o terminal do usuário via Function Calling.');
-  toolLines.push('2. O cliente local (OpenCode) intercepta e executa automaticamente qualquer chamada que você fizer.');
-  toolLines.push('3. NUNCA diga que ferramentas não estão expostas, indisponíveis ou inacessíveis nesta sessão.');
-  toolLines.push('4. Para ler a pasta, listar arquivos, ler código ou inspecionar o projeto, sua PRIMEIRA resposta DEVE ser a chamada da ferramenta.');
-  toolLines.push('5. Responda APENAS com o bloco JSON no seguinte formato exato (sem texto introdutório antes):');
-  toolLines.push('```json');
-  toolLines.push('{"tool_call": {"name": "nome_da_ferramenta", "arguments": { ... }}}');
-  toolLines.push('```');
+  toolLines.push('RULES:');
+  toolLines.push('1. Tool needed → reply ONLY with the tool_call JSON block (no prose before/after).');
+  toolLines.push('2. Multiple tools OK in one reply as separate JSON objects.');
+  toolLines.push('3. Task done → short final answer in pt-BR (no tool_call).');
+  toolLines.push('4. If prior messages already contain tool results, do NOT call the same tool again — progress or finish.');
+  toolLines.push('5. NO sub-agents. Never emit task/skill/todowrite/question. Do all work yourself with bash/glob/grep/read/edit/write.');
+  toolLines.push('6. CREATE/WRITE/SAVE file → MUST use write tool. NEVER return file body as text/markdown.');
+  toolLines.push('7. User asks question only → answer directly in text (no tool_call).');
 
   const lines = [
-    ...relevant.map(m => `[${m.role.toUpperCase()}]\n${m.content}`),
+    ...header,
+    ...history.map(m => `[${m.role.toUpperCase()}]\n${m.content}`),
     '',
     '----------------------------------------',
-    'INSTRUÇÃO MANDATÓRIA DE EXECUÇÃO (PRIORIDADE MÁXIMA):',
-    'Você é o motor conectado ao terminal local do usuário. O projeto está na máquina local dele.',
-    'NUNCA responda dizendo que não tem ferramentas expostas ou que o terminal não está disponível.',
-    ...toolLines,
-    'AÇÃO IMEDIATA: Para analisar ou ler o projeto, emita AGORA no início da sua resposta o JSON acima (ex: glob ou read ou bash).'
+    ...toolLines
   ];
 
   return lines.join('\n');
@@ -163,76 +191,103 @@ function failTask(task, message, type = 'server_error', status = 503) {
   cleanupTask(task);
 }
 
-function parseToolCalls(content) {
-  if (!content) return null;
-  try {
-    // 1. Procura primeiro se há um bloco json delimitado ou chave tool_call
-    const toolCallRegex = /\{[\s\S]*?"tool_call"[\s\S]*?\}/;
-    const match = content.match(toolCallRegex);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      if (parsed?.tool_call?.name) {
-        return [{
-          id: `call_${randomUUID().slice(0, 9)}`,
-          type: 'function',
-          function: {
-            name: parsed.tool_call.name,
-            arguments: typeof parsed.tool_call.arguments === 'string'
-              ? parsed.tool_call.arguments
-              : JSON.stringify(parsed.tool_call.arguments || {})
-          }
-        }];
-      }
-    }
-
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) {
-      const jsonString = content.slice(start, end + 1);
-      const parsed = JSON.parse(jsonString);
-      if (parsed?.tool_call?.name) {
-        return [{
-          id: `call_${randomUUID().slice(0, 9)}`,
-          type: 'function',
-          function: {
-            name: parsed.tool_call.name,
-            arguments: typeof parsed.tool_call.arguments === 'string'
-              ? parsed.tool_call.arguments
-              : JSON.stringify(parsed.tool_call.arguments || {})
-          }
-        }];
-      }
-    }
-  } catch (e) {}
-  return null;
-}
-
 function finishTask(task, content) {
   if (!tasks.has(task.id)) return;
   task.content = content || '';
 
   let toolCalls = parseToolCalls(task.content);
 
-  // Fallback Inteligente: Se o ChatGPT respondeu se recusando ("não consigo executar a análise... ferramenta não disponível"),
-  // nós detectamos essa recusa e forçamos a chamada da ferramenta 'glob' ou 'bash' para o OpenCode executar!
-  if (!toolCalls && task.tools && task.tools.length > 0) {
-    const isRefusal = /não consigo|não foi disponibilizada|ferramenta.*não.*disponível|preciso que a ferramenta/i.test(task.content);
-    if (isRefusal) {
-      console.log(`[${new Date().toLocaleTimeString()}] 💡 ChatGPT hesitou, auto-acionando ferramenta glob para prosseguir a análise!`);
-      const hasGlob = task.tools.some(t => (t.function?.name || t.name) === 'glob');
-      const hasBash = task.tools.some(t => (t.function?.name || t.name) === 'bash');
-      const toolName = hasGlob ? 'glob' : (hasBash ? 'bash' : (task.tools[0].function?.name || task.tools[0].name));
-      const args = toolName === 'glob' 
-        ? { pattern: '**/*' } 
-        : (toolName === 'bash' ? { command: 'Get-ChildItem -Force | Select-Object Mode,Length,LastWriteTime,Name' } : {});
+  if (toolCalls) {
+    console.log(`[${new Date().toLocaleTimeString()}] 🔍 parseToolCalls OK: ${toolCalls.map(c => c.function.name).join(', ')}`);
+    logToFile('PARSE_OK', { taskId: task.id, names: toolCalls.map(c => c.function.name) });
+  } else if (task.content) {
+    console.warn(`[${new Date().toLocaleTimeString()}] 🔍 parseToolCalls NULL — conteúdo vira texto puro. Preview: ${task.content.slice(0, 200)}`);
+    logToFile('PARSE_NULL', { taskId: task.id, preview: task.content.slice(0, 300) });
+  }
 
+  // Auto-detecção: converte em write só se houver arquivo REAL substancial no texto
+  if (!toolCalls && task.tools?.length > 0) {
+    const names = task.tools.map(t => t.function?.name || t.name).filter(Boolean);
+    const writeTool = ['write', 'write_file', 'create_file'].find(n => names.includes(n));
+    if (writeTool) {
+      const c = task.content || '';
+      let body = '';
+      let lang = '';
+
+      // 1) Fence de código com lang de arquivo OU fence cujo conteúdo pareça html — pega o MAIOR (>=200 chars)
+      const fenceRe = /```([a-z0-9_-]*)[^\n]*\n([\s\S]*?)\n```/gi;
+      let m;
+      let best = null;
+      while ((m = fenceRe.exec(c)) !== null) {
+        const fenceLang = (m[1] || '').toLowerCase();
+        const fenceBody = m[2] || '';
+        const langOk = ['html', 'htm', 'javascript', 'js', 'typescript', 'ts', 'python', 'py', 'bash', 'sh', 'json', 'css'].includes(fenceLang);
+        const looksHtml = /<!DOCTYPE html|<html[\s>]/i.test(fenceBody);
+        if (fenceBody.length >= 200 && (langOk || looksHtml)) {
+          if (!best || fenceBody.length > best.body.length) {
+            best = { lang: fenceLang || (looksHtml ? 'html' : ''), body: fenceBody };
+          }
+        }
+      }
+      if (best && best.body.length >= 200) {
+        body = best.body;
+        lang = best.lang;
+      } else {
+        // 2) HTML embutido no MEIO da prosa (ex: "Salve como index.html:\n<!DOCTYPE...>")
+        const docIdx = c.search(/<!DOCTYPE html>|<html[\s>]/i);
+        if (docIdx !== -1) {
+          const fromDoc = c.slice(docIdx);
+          const endIdx = fromDoc.toLowerCase().lastIndexOf('</html>');
+          const candidate = endIdx !== -1 ? fromDoc.slice(0, endIdx + 7) : fromDoc;
+          if (candidate.length >= 200) {
+            body = candidate;
+            lang = 'html';
+          }
+        } else {
+          // 3) Shebang / arquivo que começa a resposta
+          const trimmed = c.trim();
+          if (/^#!/.test(trimmed) && trimmed.length >= 200) {
+            body = trimmed;
+            lang = 'bash';
+          }
+        }
+      }
+
+      if (body) {
+        const langMap = { html: 'index.html', htm: 'index.html', '': 'index.html', css: 'styles.css', js: 'script.js', javascript: 'script.js', ts: 'script.ts', typescript: 'script.ts', python: 'script.py', py: 'script.py', bash: 'script.sh', sh: 'script.sh', json: 'config.json' };
+        const path = langMap[lang] || 'index.html';
+        console.log(`[${new Date().toLocaleTimeString()}] 📄 Arquivo real detectado (${lang || 'html'}, ${body.length} chars) — write("${path}")`);
+        logToFile('FORCE_WRITE', { taskId: task.id, path, lang, chars: body.length });
+        toolCalls = [{
+          id: `call_${randomUUID().slice(0, 9)}`,
+          type: 'function',
+          function: { name: writeTool, arguments: JSON.stringify({ filePath: path, content: body }) }
+        }];
+        task.content = '';
+      }
+    }
+  }
+
+  // Fallback: recusa OU narração de intenção sem JSON — força uma chamada segura (não bash).
+  if (!toolCalls && task.tools?.length > 0 && (isRefusalText(task.content) || isActionIntentText(task.content))) {
+    const names = task.tools.map(t => t.function?.name || t.name).filter(Boolean);
+    const preferred = ['glob', 'list_directory', 'read', 'read_file', 'grep', 'grep_search'];
+    const toolName = preferred.find(n => names.includes(n)) || names[0];
+    if (toolName) {
+      const reason = isRefusalText(task.content) ? 'Recusa detectada' : 'Narração de intenção sem JSON';
+      console.log(`[${new Date().toLocaleTimeString()}] 💡 ${reason} — forçando tool "${toolName}"`);
+      logToFile('FORCE_TOOL', { taskId: task.id, reason, tool: toolName, preview: (task.content || '').slice(0, 200) });
+      const args = (toolName === 'glob' || toolName === 'list_directory')
+        ? { pattern: '**/*' }
+        : (toolName === 'read_file' || toolName === 'read')
+          ? { path: 'package.json' }
+          : (toolName === 'grep' || toolName === 'grep_search')
+            ? { query: '.' }
+            : {};
       toolCalls = [{
         id: `call_${randomUUID().slice(0, 9)}`,
         type: 'function',
-        function: {
-          name: toolName,
-          arguments: JSON.stringify(args)
-        }
+        function: { name: toolName, arguments: JSON.stringify(args) }
       }];
     }
   }
@@ -240,8 +295,8 @@ function finishTask(task, content) {
   if (task.stream) {
     if (!task.res.writableEnded) {
       if (toolCalls) {
-        console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Stream: Emitindo tool_call ${toolCalls[0].function.name} para o OpenCode`);
-        logToFile('EMIT_TOOL_CALL', { taskId: task.id, toolCall: toolCalls[0] });
+        console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Stream: emitindo ${toolCalls.length} tool_call(s): ${toolCalls.map(c => c.function.name).join(', ')}`);
+        logToFile('EMIT_TOOL_CALL', { taskId: task.id, names: toolCalls.map(c => c.function.name) });
         writeSSE(task.res, {
           id: task.id,
           object: 'chat.completion.chunk',
@@ -251,15 +306,15 @@ function finishTask(task, content) {
             index: 0,
             delta: {
               role: 'assistant',
-              tool_calls: [{
-                index: 0,
-                id: toolCalls[0].id,
+              tool_calls: toolCalls.map((call, index) => ({
+                index,
+                id: call.id,
                 type: 'function',
                 function: {
-                  name: toolCalls[0].function.name,
-                  arguments: toolCalls[0].function.arguments
+                  name: call.function.name,
+                  arguments: call.function.arguments
                 }
-              }]
+              }))
             },
             finish_reason: null
           }]
@@ -298,7 +353,7 @@ function finishTask(task, content) {
       content: toolCalls ? null : task.content
     };
     if (toolCalls) {
-      console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Non-stream: Emitindo tool_call ${toolCalls[0].function.name} para o OpenCode`);
+      console.log(`[${new Date().toLocaleTimeString()}] 🛠️ Non-stream: emitindo ${toolCalls.length} tool_call(s): ${toolCalls.map(c => c.function.name).join(', ')}`);
       messageObj.tool_calls = toolCalls;
     }
 
@@ -341,7 +396,7 @@ function dispatch() {
 
   console.log(`[${new Date().toLocaleTimeString()}] 🚀 Enviando tarefa ${task.id} para agente ${agent.id} (stream: ${task.stream})`);
   console.log(`[${new Date().toLocaleTimeString()}] 📝 [PROMPT ENVIADO AO CHATGPT]:\n${task.message.slice(0, 300)}...\n[FIM DO PREVIEW DO PROMPT]`);
-  logToFile('DISPATCH', { taskId: task.id, agentId: agent.id, stream: task.stream, prompt: task.message });
+  logToFile('DISPATCH', { taskId: task.id, agentId: agent.id, stream: task.stream, promptPreview: task.message.slice(0, 500) });
 
     task.timer = setTimeout(() => {
       console.warn(`[${new Date().toLocaleTimeString()}] ⏰ Timeout da tarefa ${task.id} no agente ${agent.id}`);
@@ -375,13 +430,14 @@ function createTask(input, res) {
   const tools = input.tools || [];
   console.log(`[${new Date().toLocaleTimeString()}] 🔧 Tools recebidas do OpenCode: ${tools.length > 0 ? tools.map(t => (t.function?.name || t.name)).join(', ') : 'Nenhuma (usando fallback padrão)'}`);
   const id = `chatcmpl-${randomUUID()}`;
+  const wantsNew = input.new_conversation === true;
   const task = {
     id,
     model: input.model || 'chatgpt-web',
     message: buildBrowserPrompt(messages, tools),
     messages,
     tools,
-    newConversation: input.new_conversation !== false,
+    newConversation: wantsNew,
     stream: input.stream === true,
     status: 'queued',
     content: '',
@@ -394,6 +450,28 @@ function createTask(input, res) {
   };
 
   tasks.set(id, task);
+
+  const auth = getChatGPTAuthState();
+  if (DIRECT_MODE && auth.hasToken) {
+    if (wantsNew) resetDirectConversation();
+    task.status = 'processing';
+    console.log(`[${new Date().toLocaleTimeString()}] ⚡ API direta ChatGPT (sem DOM) para ${id}`);
+    logToFile('DIRECT_START', { taskId: id, stream: task.stream, ageMs: auth.ageMs });
+    runDirect(task, userMessage.content).catch(err => {
+      console.warn(`[${new Date().toLocaleTimeString()}] ⚠️ API direta falhou, fallback extensão: ${err.message}`);
+      logToFile('DIRECT_FAIL', { taskId: id, error: err.message, status: err.status || null });
+      task.status = 'queued';
+      queue.push(task);
+      task.queueTimer = setTimeout(() => {
+        const index = queue.indexOf(task);
+        if (index >= 0) queue.splice(index, 1);
+        failTask(task, 'No browser agent became available before queue timeout.');
+      }, QUEUE_TIMEOUT_MS);
+      dispatch();
+    });
+    return task;
+  }
+
   queue.push(task);
 
   task.queueTimer = setTimeout(() => {
@@ -406,11 +484,32 @@ function createTask(input, res) {
   return task;
 }
 
+async function runDirect(task, prompt) {
+  const started = Date.now();
+  const result = await chatCompletionDirect(prompt);
+  const text = result.content || '';
+
+  if (task.res.writableEnded) {
+    cleanupTask(task);
+    return;
+  }
+
+  task.status = 'completed';
+  task.sentLength = 0;
+  task.streamStarted = false;
+  finishTask(task, text);
+
+  logToFile('DIRECT_OK', { taskId: task.id, ms: Date.now() - started, chars: text.length, conv: !!result.conversationId });
+  console.log(`[${new Date().toLocaleTimeString()}] ✅ API direta OK ${task.id} em ${Date.now() - started}ms (${text.length} chars)`);
+}
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     agents: [...agents.values()].map(a => ({ id: a.id, status: a.status })),
-    queued: queue.length
+    queued: queue.length,
+    direct: getChatGPTAuthState(),
+    directMode: DIRECT_MODE
   });
 });
 
@@ -526,6 +625,17 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    if (message.type === 'auth.chatgpt' && message.access_token) {
+      const before = getChatGPTAuthState().hasToken;
+      setChatGPTAuth(message.access_token, message.account_id || '');
+      const after = getChatGPTAuthState().hasToken;
+      if (!before && after) {
+        console.log(`[${now()}] 🔑 accessToken ChatGPT recebido (ok).`);
+        logToFile('AUTH', { agentId: id, hasToken: true });
+      }
+      return;
+    }
+
     if (message.type === 'agent.ready') {
       agent.status = 'available';
       agent.taskId = null;
@@ -546,18 +656,23 @@ wss.on('connection', (ws, req) => {
       // Se a resposta começar com '{', '```', 'JSON' ou contiver 'tool_call',
       // é uma chamada de ferramenta. Retemos no buffer para converter no objeto nativo do OpenAI.
       const trimmed = task.bufferedContent.trim();
-      const isSuspectToolCall = trimmed.startsWith('{') || 
+      const isSuspectToolCall = trimmed.startsWith('{') ||
                                 trimmed.startsWith('```') ||
                                 /^json/i.test(trimmed) ||
                                 task.bufferedContent.includes('"tool_call"') ||
+                                task.bufferedContent.includes('"tool_calls"') ||
                                 task.bufferedContent.includes('tool_call');
 
-      // Se há ferramentas disponíveis na requisição, retemos o stream para permitir que finishTask converta em tool_call caso o modelo emita o JSON ou hesite
       const hasTools = Array.isArray(task.tools) && task.tools.length > 0;
-      const isRefusal = /não consigo|não foi disponibilizada|ferramenta.*não.*disponível|preciso que a ferramenta/i.test(trimmed);
 
-      if (!isSuspectToolCall && (!hasTools || !isRefusal)) {
-        // Se for texto conversacional normal, descarrega via SSE
+      // Com tools, retém tudo até o task.result: evita enviar narração parcial
+      // ("Vou...") ao OpenCode e depois trocar por tool_calls no final.
+      if (hasTools) return;
+
+      const isRefusal = isRefusalText(trimmed);
+
+      // Sem tools: só retém se houver indício de tool_call/recusa — texto normal segue imediato
+      if (!isSuspectToolCall && !isRefusal) {
         const toSend = task.bufferedContent.slice(task.sentLength || 0);
         if (toSend) {
           writeSSE(task.res, openAIChunk(task, { content: toSend }));
@@ -576,9 +691,8 @@ wss.on('connection', (ws, req) => {
       agent.taskId = null;
 
       if (message.ok) {
-        console.log(`[${now()}] ✅ Tarefa ${task.id} concluída com sucesso (${(message.content || '').length} caracteres)`);
-        console.log(`[${now()}] 💬 [RESPOSTA DO CHATGPT]:\n${message.content}\n[FIM DA RESPOSTA]`);
-        logToFile('RESULT', { taskId: task.id, length: (message.content || '').length, content: message.content });
+        console.log(`[${now()}] ✅ Tarefa ${task.id} concluída (${(message.content || '').length} caracteres)`);
+        logToFile('RESULT', { taskId: task.id, length: (message.content || '').length, contentPreview: (message.content || '').slice(0, 500) });
         task.status = 'completed';
         finishTask(task, message.content || '');
       } else if (message.error && message.error.includes('Browser agent is busy')) {

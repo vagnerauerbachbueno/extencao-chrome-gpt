@@ -1,4 +1,4 @@
-const defaults = { serverUrl: 'https://vagner.defence.com.br', token: '' };
+const defaults = { serverUrl: 'http://localhost:5503', token: '' };
 
 async function load() {
   const cfg = await chrome.storage.local.get(defaults);
@@ -8,7 +8,7 @@ async function load() {
 
 document.getElementById('save').onclick = async () => {
   await chrome.storage.local.set({
-    serverUrl: document.getElementById('serverUrl').value.replace(/\\/$/, ''),
+    serverUrl: document.getElementById('serverUrl').value.replace(/\/+$/, ''),
     token: document.getElementById('token').value
   });
   await chrome.runtime.sendMessage({ type: 'reconnect' });

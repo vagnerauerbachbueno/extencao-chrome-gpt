@@ -46,7 +46,14 @@ cp .env.example .env
 npm start
 ```
 
-Servidor padrão: `http://localhost:8787`.
+Servidor padrão: `http://localhost:5503`.
+
+Testes do parser de tool_calls:
+
+```bash
+cd server
+npm test
+```
 
 ## Extensão
 
@@ -57,8 +64,9 @@ Abra o ChatGPT em uma aba e verifique o estado da extensão.
 ## Exemplo normal
 
 ```bash
-curl http://localhost:8787/v1/chat/completions \
+curl http://localhost:5503/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
   -d '{
     "model":"chatgpt-web",
     "stream":false,
@@ -104,12 +112,24 @@ data: [DONE]
 
 ## Variáveis
 
-- `PORT`: porta HTTP/WebSocket, padrão 8787
-- `API_KEY`: Bearer token opcional
+- `PORT`: porta HTTP/WebSocket, padrão 5503 (no `.env` do repositório)
+- `API_KEY`: Bearer token opcional (recomendado fora de localhost)
 - `TASK_TIMEOUT_MS`: timeout da tarefa, padrão 180000
 - `QUEUE_TIMEOUT_MS`: timeout aguardando agente, padrão 120000
 - `CORS_ORIGIN`: origem permitida, padrão `*`
 
+## Tool calling
+
+Quando a requisição inclui `tools`, o servidor instrui o ChatGPT Web a emitir JSON no formato:
+
+```json
+{"tool_call": {"name": "read_file", "arguments": {"path": "package.json"}}}
+```
+
+O parser aceita também o formato OpenAI `{"tool_calls": [...]}` e múltiplos `tool_call` na mesma resposta. A resposta OpenAI sai com `choices[].message.tool_calls` e `finish_reason: "tool_calls"`.
+
+No streaming, as tool_calls são emitidas em um único chunk com `delta.tool_calls` indexado.
+
 ## Segurança
 
-Não coloque credenciais do ChatGPT no servidor. A extensão usa a sessão existente do navegador. Em produção, use HTTPS/WSS, defina `API_KEY` e restrinja CORS.
+Não coloque credenciais do ChatGPT no servidor. A extensão usa a sessão existente do navegador. Em produção, use HTTPS/WSS, defina `API_KEY` e restrinja `CORS_ORIGIN`.

@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  serverUrl: 'https://vagner.defence.com.br',
+  serverUrl: 'http://localhost:5503',
   token: ''
 };
 
@@ -31,7 +31,7 @@ async function connect() {
   connecting = true;
 
   const cfg = await settings();
-  const base = cfg.serverUrl.replace(/\/$/, '');
+  const base = cfg.serverUrl.replace(/\/+$/, '');
   const wsBase = base.startsWith('https://') 
     ? base.replace(/^https:\/\//i, 'wss://') 
     : base.replace(/^http:\/\//i, 'ws://');
@@ -42,25 +42,27 @@ async function connect() {
     console.log('[ChatGPT-Bridge] Conectando ao WebSocket:', wsUrl);
     socket = new WebSocket(wsUrl);
 
+    socket.onmessage = async event => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      console.log('[ChatGPT-Bridge] Mensagem recebida do servidor:', msg.type);
+      if (msg.type === 'task') await handleTask(msg);
+    };
+
     socket.onopen = () => {
       console.log('[ChatGPT-Bridge] ✅ WebSocket conectado ao servidor!');
       connecting = false;
       socket.send(JSON.stringify({ type: 'agent.ready' }));
+      fetchChatGPTToken().then(() => pushAuthIfAny(true));
       broadcast({ type: 'connection', connected: true });
 
       clearInterval(pingInterval);
       pingInterval = setInterval(() => {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: 'ping' }));
+          pushAuthIfAny();
         }
       }, 15000);
-    };
-
-    socket.onmessage = async event => {
-      let msg;
-      try { msg = JSON.parse(event.data); } catch { return; }
-      console.log('[ChatGPT-Bridge] Mensagem recebida do servidor:', msg.type);
-      if (msg.type === 'task') await handleTask(msg);
     };
 
     socket.onclose = (event) => {
@@ -88,6 +90,78 @@ async function connect() {
 function broadcast(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
+
+let lastAuthPushAt = 0;
+let lastAuthPushToken = '';
+async function pushAuthIfAny(force = false) {
+  try {
+    const now = Date.now();
+    const { chatgpt_access_token, chatgpt_account_id } = await chrome.storage.local.get([
+      'chatgpt_access_token',
+      'chatgpt_account_id'
+    ]);
+    if (!chatgpt_access_token || !socket || socket.readyState !== WebSocket.OPEN) return;
+    const same = chatgpt_access_token === lastAuthPushToken;
+    if (!force && (same || now - lastAuthPushAt < 60000)) return;
+    lastAuthPushAt = now;
+    lastAuthPushToken = chatgpt_access_token;
+    socket.send(JSON.stringify({
+      type: 'auth.chatgpt',
+      access_token: chatgpt_access_token,
+      account_id: chatgpt_account_id || ''
+    }));
+    appendLog('AUTH_PUSHED', { hasToken: true, force });
+  } catch (e) {
+    appendLog('AUTH_PUSH_ERROR', { error: e.message });
+  }
+}
+
+async function fetchChatGPTToken() {
+  try {
+    const res = await fetch('https://chatgpt.com/api/auth/session', {
+      credentials: 'include',
+      headers: { Accept: 'application/json' }
+    });
+    const raw = await res.text();
+    let data = null;
+    try { data = JSON.parse(raw); } catch { data = null; }
+    const token = data?.accessToken || '';
+    const account = data?.user?.id || data?.auth?.account_id || data?.account_id || '';
+    await chrome.storage.local.set({
+      chatgpt_access_token: token,
+      chatgpt_account_id: account,
+      chatgpt_auth_status: token ? 'ok' : (res.ok ? 'no_token' : `http_${res.status}`),
+      chatgpt_auth_at: new Date().toISOString(),
+      chatgpt_auth_source: 'background',
+      chatgpt_auth_preview: (raw || '').slice(0, 100)
+    });
+    appendLog('AUTH_FETCH', { status: res.status, hasToken: !!token, preview: (raw || '').slice(0, 60) });
+    if (token) await pushAuthIfAny(true);
+    return token;
+  } catch (e) {
+    await chrome.storage.local.set({ chatgpt_auth_status: 'error', chatgpt_auth_error: e.message });
+    appendLog('AUTH_FETCH_ERROR', { error: e.message });
+    return '';
+  }
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'auth.chatgpt' && message.access_token) {
+    chrome.storage.local.set({
+      chatgpt_access_token: message.access_token,
+      chatgpt_account_id: message.account_id || '',
+      chatgpt_auth_status: 'ok',
+      chatgpt_auth_at: new Date().toISOString()
+    }).then(() => pushAuthIfAny(true));
+  }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.chatgpt_access_token?.newValue) {
+    pushAuthIfAny(true);
+  }
+});
 
 async function findChatTab() {
   const tabs = await chrome.tabs.query({
@@ -168,6 +242,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       console.log('[ChatGPT-Bridge] KeepAlive alarme disparado: reconectando WebSocket...');
       connect();
     }
+    fetchChatGPTToken();
   }
 });
 

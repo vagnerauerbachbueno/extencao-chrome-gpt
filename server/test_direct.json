@@ -1,0 +1,5 @@
+{
+  "model": "gpt 5.6",
+  "stream": false,
+  "messages": [{ "role": "user", "content": "Responda apenas: PONG" }]
+}
