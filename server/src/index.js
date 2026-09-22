@@ -325,6 +325,7 @@ function createTask(input, res) {
   }
 
   const tools = input.tools || [];
+  console.log(`[${new Date().toLocaleTimeString()}] 🔧 Tools recebidas do OpenCode: ${tools.length > 0 ? tools.map(t => (t.function?.name || t.name)).join(', ') : 'Nenhuma (usando fallback padrão)'}`);
   const id = `chatcmpl-${randomUUID()}`;
   const task = {
     id,
@@ -513,6 +514,7 @@ wss.on('connection', (ws, req) => {
 
       if (message.ok) {
         console.log(`[${now()}] ✅ Tarefa ${task.id} concluída com sucesso (${(message.content || '').length} caracteres)`);
+        console.log(`[${now()}] 💬 [RESPOSTA DO CHATGPT]:\n${message.content}\n[FIM DA RESPOSTA]`);
         task.status = 'completed';
         finishTask(task, message.content || '');
       } else if (message.error && message.error.includes('Browser agent is busy')) {

@@ -207,21 +207,25 @@ async function waitForAssistantResponse(beforeCount, taskId, stream) {
   let stableText = '';
   let stableCount = 0;
   let lastSent = '';
+  let startedGenerating = false;
 
-  for (let i = 0; i < 240; i++) {
+  // Aguarda até 3 minutos no total
+  for (let i = 0; i < 360; i++) {
     await sleep(stream ? 400 : 800);
 
     const messages = extractMessages();
-    // Pega as mensagens geradas após a contagem anterior
     const newMessages = messages.slice(beforeCount);
     const latest = newMessages[newMessages.length - 1] || '';
+
+    const generating = isGenerating();
+    if (generating || latest.length > 0) {
+      startedGenerating = true;
+    }
 
     if (stream && latest.length > lastSent.length && latest.startsWith(lastSent)) {
       sendDelta(taskId, latest.slice(lastSent.length));
       lastSent = latest;
     }
-
-    const generating = isGenerating();
 
     if (latest && latest === stableText) {
       stableCount++;
@@ -233,21 +237,23 @@ async function waitForAssistantResponse(beforeCount, taskId, stream) {
     const composer = findComposer();
     const sendButton = findSendButton();
 
-    // Se o botão de Stop sumiu e o texto estabilizou
-    if (latest && !generating && stableCount >= 3) {
-      // Garante enviar qualquer sobra de delta antes de fechar
-      if (stream && latest.length > lastSent.length) {
-        sendDelta(taskId, latest.slice(lastSent.length));
+    // Só encerra se temos certeza que a geração começou e já concluiu
+    if (startedGenerating && latest && !generating) {
+      // Se o botão de Stop sumiu e o texto estabilizou por pelo menos 4 checagens (~2s)
+      if (stableCount >= 4) {
+        if (stream && latest.length > lastSent.length) {
+          sendDelta(taskId, latest.slice(lastSent.length));
+        }
+        return latest;
       }
-      return latest;
-    }
 
-    // Fallback: botão de enviar habilitado de volta
-    if (latest && !generating && stableCount >= 2 && composer && (!sendButton || !sendButton.disabled)) {
-      if (stream && latest.length > lastSent.length) {
-        sendDelta(taskId, latest.slice(lastSent.length));
+      // Se o composer voltou e o botão de envio está pronto de novo
+      if (stableCount >= 3 && composer && (!sendButton || !sendButton.disabled)) {
+        if (stream && latest.length > lastSent.length) {
+          sendDelta(taskId, latest.slice(lastSent.length));
+        }
+        return latest;
       }
-      return latest;
     }
   }
 
