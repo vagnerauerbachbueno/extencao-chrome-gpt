@@ -138,15 +138,21 @@ async function startNewConversation() {
 
   if (button) {
     button.click();
-    await sleep(800);
+    await sleep(1000);
     return;
   }
 
   const home = [...document.querySelectorAll('a[href="/"]')].find(isVisible);
-
   if (home) {
     home.click();
-    await sleep(800);
+    await sleep(1000);
+    return;
+  }
+
+  // Fallback garantido se não achar o botão: reseta via URL caso não esteja na raiz
+  if (window.location.pathname !== '/') {
+    window.location.href = 'https://chatgpt.com/';
+    await sleep(1500);
   }
 }
 

@@ -84,21 +84,22 @@ function buildBrowserPrompt(messages, tools = []) {
     if (fn.parameters) toolLines.push(`  Parâmetros: ${JSON.stringify(fn.parameters)}`);
   }
   toolLines.push('');
-  toolLines.push('COMO EXECUTAR AÇÕES NO PROJETO:');
-  toolLines.push('Você TEM sim acesso a estas ferramentas locais através do protocolo do terminal.');
-  toolLines.push('Quando você precisar ler a pasta, ler arquivos ou rodar comandos para analisar o projeto, NÃO diga que não tem ferramentas expostas.');
-  toolLines.push('Emita IMEDIATAMENTE a invocação no seguinte formato JSON:');
+  toolLines.push('REGRA FUNDAMENTAL DE EXECUÇÃO DE FERRAMENTAS:');
+  toolLines.push('1. Você é o cérebro que comanda o terminal do usuário via Function Calling.');
+  toolLines.push('2. O cliente local (OpenCode) intercepta e executa automaticamente qualquer chamada que você fizer.');
+  toolLines.push('3. NUNCA diga que ferramentas não estão expostas, indisponíveis ou inacessíveis nesta sessão.');
+  toolLines.push('4. Para ler a pasta, listar arquivos, ler código ou inspecionar o projeto, sua PRIMEIRA resposta DEVE ser a chamada da ferramenta.');
+  toolLines.push('5. Responda APENAS com o bloco JSON no seguinte formato exato (sem texto introdutório antes):');
   toolLines.push('```json');
   toolLines.push('{"tool_call": {"name": "nome_da_ferramenta", "arguments": { ... }}}');
   toolLines.push('```');
-  toolLines.push('O cliente receberá essa chamada, executará a ação na máquina do usuário e retornará o conteúdo para você continuar.');
 
   const lines = [
     'Você é o motor de IA e desenvolvimento conectado ao terminal de código local do usuário (OpenCode / Codex / CLI).',
     'DIRETRIZES DE EXECUÇÃO:',
     '1. O usuário está em uma pasta/projeto LOCAL no computador dele.',
     '2. NÃO invente nem procure repositórios remotos do GitHub/web, a menos que uma URL remota seja fornecida explicitamente.',
-    '3. Quando solicitado a analisar o projeto, ler ou modificar arquivos, use as ferramentas disponíveis para ler o diretório ou peça os arquivos da pasta local.',
+    '3. Quando solicitado a analisar o projeto, ler ou modificar arquivos, NUNCA responda dizendo que não tem ferramentas expostas. Dispare IMEDIATAMENTE a ferramenta de listagem de diretório ou leitura de arquivo.',
     '4. Se você decidir invocar uma ferramenta, responda com o bloco JSON da ferramenta indicado acima.',
     '5. Mantenha as respostas focadas, técnicas e de alto nível de engenharia de software.',
     '6. Não mencione detalhes da interface web, extensão ou ponte de comunicação.',
@@ -393,13 +394,15 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.post('/v1/chat/completions', (req, res) => {
-  console.log(`[${new Date().toLocaleTimeString()}] 📩 Nova requisição recebida em /v1/chat/completions`);
+  const body = req.body || {};
+  const userMsg = Array.isArray(body.messages) ? [...body.messages].reverse().find(m => m.role === 'user')?.content : '';
+  const userPreview = typeof userMsg === 'string' ? userMsg.slice(0, 100) : JSON.stringify(userMsg || '').slice(0, 100);
+  console.log(`[${new Date().toLocaleTimeString()}] 📩 Nova requisição /v1/chat/completions (model: ${body.model}, stream: ${body.stream}, msgs: ${body.messages?.length || 0}) -> "${userPreview}"`);
+  
   if (!authorized(req)) {
     console.warn('❌ Requisição não autorizada');
     return res.status(401).json(errorBody('Unauthorized', 'authentication_error'));
   }
-
-  const body = req.body || {};
 
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return res.status(400).json(errorBody('messages is required and must be a non-empty array'));
